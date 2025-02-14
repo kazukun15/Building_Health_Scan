@@ -1,5 +1,11 @@
-import os
+import sys
 import streamlit as st
+
+# Pythonバージョンチェック（3.12以上の場合はエラーを出して中断）
+if sys.version_info >= (3, 12):
+    st.error("このアプリはPython 3.11環境で動作するよう設計されています。現在のPythonバージョンは {}.{}.{} です。Python 3.11 で実行してください。".format(*sys.version_info))
+    st.stop()
+
 import requests
 import json
 import io
@@ -52,7 +58,6 @@ def search_relevant_chunks(query, model, index, chunks, top_k=3):
     """ユーザーのクエリに基づき、関連チャンクをFAISSから検索"""
     query_vec = model.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_vec, top_k)
-    # インデックスが範囲内のチャンクを返す
     return [chunks[i] for i in indices[0] if i < len(chunks)]
 
 # ============================
@@ -66,8 +71,7 @@ def load_caption_model():
     return processor, model
 
 def generate_image_caption(image, processor, model):
-    """1枚の画像からキャプション生成。画像はRGBに変換し、リサイズも実施（例：最大幅800px）"""
-    # 画像サイズが大きい場合はリサイズ（例: 最大幅800px）
+    """1枚の画像からキャプション生成。画像はRGBに変換し、リサイズも実施（最大幅800px）"""
     max_width = 800
     if image.width > max_width:
         ratio = max_width / image.width
@@ -110,7 +114,7 @@ def generate_report_with_gemini(prompt_text):
 def main():
     st.title("多角的レポート生成システム")
     st.write(
-        "このアプリは、Structure_Base.pdfに含まれる国土交通省の基準情報と、"
+        "このアプリは、Structure_Base.pdf に含まれる国土交通省の基準情報と、"
         "ユーザーがアップロードした複数枚の画像から抽出されたキャプションを組み合わせ、"
         "総合的な外壁・構造物の状態分析レポートを生成します。"
     )
@@ -148,7 +152,6 @@ def main():
         if images:
             st.write("画像キャプション生成中です...")
             processor, cap_model = load_caption_model()
-            # 並列処理（スレッド）で各画像処理
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 captions = list(executor.map(lambda img: generate_image_caption(img, processor, cap_model), images))
             st.write("生成された各画像のキャプション:")
