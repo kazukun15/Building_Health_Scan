@@ -1,5 +1,6 @@
 streamlit
 requests
-Pillow
-transformers
+PyPDF2
+faiss-cpu
+sentence-transformers
 torch
