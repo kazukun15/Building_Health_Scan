@@ -33,7 +33,6 @@ def generate_analysis_report(prompt_text):
         return {"error": "Gemini API Key is missing. Please add it to your .streamlit/secrets.toml file."}
     
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-    
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [
@@ -48,7 +47,7 @@ def generate_analysis_report(prompt_text):
         return {"error": str(e)}
 
 def main():
-    st.title("Facade Insight with Image Captioning")
+    st.title("建物診断君")
     st.write(
         "このアプリは、アップロードされた画像から自動でキャプションを生成し、"
         "その内容を元に国土交通省基準に沿った外壁・物体の状態分析レポートを生成します。"
@@ -88,21 +87,49 @@ def main():
             st.write("生成されたキャプション:")
             st.write(caption)
             
-            # 画像がアップロードされたことを前提としたプロンプトを作成
+            # 画像をJPEG形式で保存する前にRGBモードに変換（今後の拡張用）
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            img_byte_arr = io.BytesIO()
+            image.save(img_byte_arr, format='JPEG')
+            img_bytes = img_byte_arr.getvalue()
+            
+            # プロンプト作成：生成されたキャプションを含め、詳細レポートの生成を指示
             prompt = (
                 f"アップロードされた画像のキャプション: '{caption}'.\n\n"
-                "上記キャプションに基づき、国土交通省の基準に沿った外壁や物体の状態分析レポートを生成してください。\n"
-                "非破壊検査、建築業、材料学の専門知識を活用し、劣化度をA、B、C、Dで評価し、推定寿命および補修・改修計画も含めた詳細なレポートを作成してください。"
+                "上記キャプションに基づき、以下のレポートテンプレートに沿った、国土交通省の基準に準拠する外壁・物体の状態分析レポートを生成してください。\n\n"
+                "【レポートテンプレート】\n"
+                "-----------------------------\n"
+                "【外壁状態分析レポート】\n\n"
+                "1. 調査概要\n"
+                "　- 調査対象、調査目的、調査方法、調査日、調査者など\n\n"
+                "2. 調査結果\n"
+                "　- ひび割れ、浮き・剥離、変色・汚染などの評価（各項目でA～D評価）\n\n"
+                "3. 劣化度評価（総合評価）\n"
+                "　- A: 健全、B: 軽微、C: 中程度、D: 重大\n\n"
+                "4. 推定寿命\n"
+                "　- 現在の状態からの推定寿命、補修後の推定寿命\n\n"
+                "5. 補修・改修計画（提案）\n"
+                "　- 優先順位、具体的な補修方法、使用材料、概算費用など\n"
+                "-----------------------------\n\n"
+                "※画像の詳細な解析は行えないため、上記テンプレートに基づいた一般的なレポートを作成してください。"
             )
             st.write("Gemini API にプロンプトを送信中です...")
             
-            # Gemini API を呼び出し解析結果を取得
+            # Gemini API を呼び出して解析結果を取得
             result = generate_analysis_report(prompt)
             if "error" in result:
                 st.error(f"API呼び出しエラー: {result['error']}")
             else:
-                st.subheader("分析結果")
-                st.json(result)
+                # JSONからレポートテキストを抽出（例: candidates[0] -> content -> parts[0] -> text）
+                try:
+                    report_text = result["candidates"][0]["content"]["parts"][0]["text"]
+                except Exception as e:
+                    st.error("レポート抽出中にエラーが発生しました: " + str(e))
+                    return
+                
+                st.subheader("分析結果レポート")
+                st.markdown(report_text)
     
     st.sidebar.markdown("---")
     st.sidebar.info(
