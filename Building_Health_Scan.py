@@ -59,7 +59,8 @@ def main():
     # 画像が選択された場合、表示する
     if image is not None:
         st.subheader("入力画像")
-        st.image(image, caption="選択された画像", use_column_width=True)
+        # use_container_width=True を使用してコンテナ幅に合わせて表示
+        st.image(image, caption="選択された画像", use_container_width=True)
     
     # 分析実行ボタン
     if st.button("分析実行"):
