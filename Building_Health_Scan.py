@@ -45,13 +45,15 @@ def create_vector_index(chunks, model):
 @st.cache_resource(show_spinner=False)
 def load_pdf_index():
     """
-    Structure_Base.pdf からテキスト抽出、チャンク分割、ベクトル化、インデックス作成  
+    Structure_Base.pdf からテキスト抽出、チャンク分割、ベクトル化、インデックス作成
     ※ Structure_Base.pdf はプロジェクトルートに配置してください
     """
     pdf_path = "Structure_Base.pdf"
     text = extract_text_from_pdf(pdf_path)
     chunks = split_text_into_chunks(text)
-    st.write(f"PDF から抽出したテキストチャンク数: {len(chunks)}")
+    # 空のチャンクや空白のみのチャンクは除外する
+    chunks = [chunk for chunk in chunks if chunk.strip()]
+    st.write(f"PDF から抽出した有効なテキストチャンク数: {len(chunks)}")
     vec_model = SentenceTransformer('all-MiniLM-L6-v2')
     index = create_vector_index(chunks, vec_model)
     return index, chunks, vec_model
@@ -85,7 +87,7 @@ def generate_image_caption(image, processor, model):
         image = image.resize(new_size)
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    # 単一画像をリスト化し、padding=True を指定してテンソル作成
+    # 単一画像をリストに包んで渡し、padding=True を指定
     inputs = processor([image], return_tensors="pt", padding=True)
     out = model.generate(**inputs)
     caption = processor.decode(out[0], skip_special_tokens=True)
@@ -120,7 +122,7 @@ def main():
         """
         このアプリは、**Structure_Base.pdf** に含まれる国土交通省の基準情報と、  
         ユーザーがアップロードまたはカメラで撮影した複数枚の画像から抽出されたキャプションを組み合わせ、  
-        総合的な外壁・構造物の状態分析レポートを生成します。
+        総合的な外壁・構造物の状態分析レポートを生成します。  
         """
     )
     
