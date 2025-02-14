@@ -1,4 +1,4 @@
-# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、代わりに zipimporter を設定
+# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、zipimporter を代用
 import pkgutil
 if not hasattr(pkgutil, "ImpImporter"):
     pkgutil.ImpImporter = pkgutil.zipimporter
@@ -35,10 +35,7 @@ def split_text_into_chunks(text, max_length=500):
     return [text[i:i+max_length] for i in range(0, len(text), max_length)]
 
 def create_vector_index(chunks, model):
-    """
-    各チャンクをバッチ処理（batch_size=32）でエンコードし、
-    FAISS インデックスを作成する。
-    """
+    """各チャンクをバッチ処理（batch_size=32）でエンコードし、FAISS インデックスを作成"""
     embeddings = model.encode(chunks, convert_to_numpy=True, batch_size=32)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
@@ -54,12 +51,19 @@ def load_pdf_index():
     pdf_path = "Structure_Base.pdf"
     text = extract_text_from_pdf(pdf_path)
     chunks = split_text_into_chunks(text)
-    # 空文字列、空白のみ、または非常に短いチャンクは除外
+    # 空文字列や空白のみ、または非常に短いチャンクは除外
     chunks = [chunk for chunk in chunks if chunk.strip() and len(chunk.strip()) > 5]
-    st.write(f"PDF から抽出した有効なテキストチャンク数: {len(chunks)}")
+    # 追加: トークナイザーを使って各チャンクを検証（SentenceTransformerのトークナイザーを利用）
     vec_model = SentenceTransformer('all-MiniLM-L6-v2')
-    index = create_vector_index(chunks, vec_model)
-    return index, chunks, vec_model
+    tokenizer = vec_model.tokenizer
+    valid_chunks = []
+    for chunk in chunks:
+        tokens = tokenizer.encode(chunk, add_special_tokens=True)
+        if len(tokens) > 0:
+            valid_chunks.append(chunk)
+    st.write(f"PDF から抽出した有効なテキストチャンク数: {len(valid_chunks)}")
+    index = create_vector_index(valid_chunks, vec_model)
+    return index, valid_chunks, vec_model
 
 def search_relevant_chunks(query, model, index, chunks, top_k=3):
     """ユーザーのクエリに基づき、関連チャンクを FAISS から検索"""
@@ -90,7 +94,6 @@ def generate_image_caption(image, processor, model):
         image = image.resize(new_size)
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    # 単一画像をリストに包み、padding=True を指定
     inputs = processor([image], return_tensors="pt", padding=True)
     out = model.generate(**inputs)
     caption = processor.decode(out[0], skip_special_tokens=True)
@@ -176,7 +179,7 @@ def main():
             st.error("質問を入力してください。")
             return
         
-        # 画像キャプション生成（順次処理）
+        # 画像キャプション生成を順次実行
         captions = []
         if images:
             st.info("画像キャプション生成中...")
