@@ -1,13 +1,10 @@
-# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、zipimporter を代用
+# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、代わりに zipimporter を設定
 import pkgutil
 if not hasattr(pkgutil, "ImpImporter"):
     pkgutil.ImpImporter = pkgutil.zipimporter
 
-import sys
 import streamlit as st
-
-# (Python 3.12.9 用のコードとして実行)
-
+import sys
 import requests
 import json
 import io
@@ -79,7 +76,7 @@ def generate_image_caption(image, processor, model):
     """
     1 枚の画像からキャプション生成
     ・画像は最大幅 800px にリサイズし、RGB に変換
-    ・プロセッサには単一画像の場合もリストとして渡す
+    ・BLIP には単一画像の場合もリストとして渡す
     """
     max_width = 800
     if image.width > max_width:
@@ -88,7 +85,6 @@ def generate_image_caption(image, processor, model):
         image = image.resize(new_size)
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    # 単一画像の場合、リストに包んで渡す
     inputs = processor([image], return_tensors="pt")
     out = model.generate(**inputs)
     caption = processor.decode(out[0], skip_special_tokens=True)
@@ -134,51 +130,47 @@ def main():
     st.sidebar.header("画像入力モード")
     mode = st.sidebar.radio("選択してください", ("ファイルアップロード", "カメラ撮影"))
     
-    # ファイルアップロードの場合
+    # 画像入力：ファイルアップロード
     uploaded_images = []
     if mode == "ファイルアップロード":
         uploaded_files = st.file_uploader("画像ファイルを選択してください", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         if uploaded_files:
             uploaded_images = [Image.open(file) for file in uploaded_files]
     
-    # カメラ撮影の場合（複数枚撮影できるようにセッション状態を使用）
+    # 画像入力：カメラ撮影（複数枚撮影できるようにセッション状態を利用）
     if mode == "カメラ撮影":
         if "captured_images" not in st.session_state:
             st.session_state.captured_images = []
         st.markdown("**カメラで写真を撮影してください。**")
-        captured = st.camera_input("カメラで写真を撮影（撮影後、自動保存）")
+        captured = st.camera_input("カメラで写真を撮影（撮影後、自動で追加されます）")
         if captured is not None:
             st.session_state.captured_images.append(Image.open(captured))
-            st.experimental_rerun()
         st.markdown("### 撮影済み画像")
         cols = st.columns(3)
         for idx, img in enumerate(st.session_state.captured_images):
             cols[idx % 3].image(img, caption=f"写真 {idx+1}", use_container_width=True)
         if st.button("撮影済み画像をクリア", key="clear_images"):
             st.session_state.captured_images = []
-            st.experimental_rerun()
     
-    # 利用する画像リストの統合
+    # 統合する画像リスト
     images = []
     if mode == "ファイルアップロード":
         images = uploaded_images
     elif mode == "カメラ撮影":
         images = st.session_state.get("captured_images", [])
     
-    # 画像一覧のグリッド表示
     if images:
         st.markdown("### 入力画像一覧")
         cols = st.columns(4)
         for idx, img in enumerate(images):
             cols[idx % 4].image(img, caption=f"画像 {idx+1}", use_container_width=True)
     
-    # レポート生成ボタン
     if st.button("レポート生成"):
         if not user_query:
             st.error("質問を入力してください。")
             return
         
-        # 複数画像のキャプション生成を並列処理で実施
+        # 複数画像のキャプション生成（並列処理）
         captions = []
         if images:
             st.info("画像キャプション生成中...")
@@ -189,7 +181,7 @@ def main():
             for i, cap in enumerate(captions):
                 st.write(f"画像 {i+1}: {cap}")
         
-        # PDF 情報の読み込み
+        # PDF からの情報読み込み
         index, chunks, vec_model = load_pdf_index()
         relevant_chunks = search_relevant_chunks(user_query, vec_model, index, chunks)
         context = "\n\n".join(relevant_chunks)
@@ -222,7 +214,7 @@ def main():
     st.sidebar.info(
         "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された複数の画像から抽出されたキャプションを組み合わせ、\n"
         "ユーザーの質問に基づいた多角的なレポートを生成します。\n\n"
-        "※ カメラ撮影モードでは、撮影後に自動で画像が保存され、[撮影済み画像をクリア] ボタンでリセットできます。"
+        "※ カメラ撮影モードでは、撮影後に自動で画像が追加され、[撮影済み画像をクリア] ボタンでリセットできます。"
     )
 
 if __name__ == "__main__":
