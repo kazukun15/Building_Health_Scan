@@ -1,4 +1,4 @@
-# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、代わりに zipimporter を設定
+# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、zipimporter を代用
 import pkgutil
 if not hasattr(pkgutil, "ImpImporter"):
     pkgutil.ImpImporter = pkgutil.zipimporter
@@ -6,7 +6,7 @@ if not hasattr(pkgutil, "ImpImporter"):
 import sys
 import streamlit as st
 
-# Python バージョンチェックは削除（Python 3.12.9 で実行する前提）
+# (Python 3.12.9 用のコードとして実行)
 
 import requests
 import json
@@ -19,7 +19,9 @@ from PIL import Image
 from sentence_transformers import SentenceTransformer
 from transformers import BlipProcessor, BlipForConditionalGeneration
 
-# --------------- PDF からのテキスト抽出と処理 ---------------
+# -------------------------------
+# PDF からのテキスト抽出と処理
+# -------------------------------
 def extract_text_from_pdf(pdf_path):
     """PDF から全ページのテキストを抽出"""
     text = ""
@@ -63,7 +65,9 @@ def search_relevant_chunks(query, model, index, chunks, top_k=3):
     distances, indices = index.search(query_vec, top_k)
     return [chunks[i] for i in indices[0] if i < len(chunks)]
 
-# --------------- 画像キャプション生成 ---------------
+# -------------------------------
+# 画像キャプション生成
+# -------------------------------
 @st.cache_resource(show_spinner=False)
 def load_caption_model():
     """BLIP の画像キャプションモデルとプロセッサのロード"""
@@ -75,6 +79,7 @@ def generate_image_caption(image, processor, model):
     """
     1 枚の画像からキャプション生成
     ・画像は最大幅 800px にリサイズし、RGB に変換
+    ・プロセッサには単一画像の場合もリストとして渡す
     """
     max_width = 800
     if image.width > max_width:
@@ -83,12 +88,15 @@ def generate_image_caption(image, processor, model):
         image = image.resize(new_size)
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    inputs = processor(image, return_tensors="pt")
+    # 単一画像の場合、リストに包んで渡す
+    inputs = processor([image], return_tensors="pt")
     out = model.generate(**inputs)
     caption = processor.decode(out[0], skip_special_tokens=True)
     return caption
 
-# --------------- Gemini API 呼び出し ---------------
+# -------------------------------
+# Gemini API 呼び出し
+# -------------------------------
 def generate_report_with_gemini(prompt_text):
     """Gemini API (gemini-2.0-flash) を呼び出してレポート生成"""
     try:
@@ -105,37 +113,66 @@ def generate_report_with_gemini(prompt_text):
     except Exception as e:
         return {"error": str(e)}
 
-# --------------- Streamlit アプリメイン ---------------
+# -------------------------------
+# Streamlit アプリメイン
+# -------------------------------
 def main():
+    st.set_page_config(page_title="多角的レポート生成システム", layout="wide")
     st.title("多角的レポート生成システム (Python 3.12.9 対応)")
-    st.write(
-        "このアプリは、Structure_Base.pdf に含まれる国土交通省の基準情報と、"
-        "ユーザーがアップロードした複数枚の画像から抽出されたキャプションを組み合わせ、"
-        "総合的な外壁・構造物の状態分析レポートを生成します。"
+    st.markdown(
+        """
+        このアプリは、**Structure_Base.pdf** に含まれる国土交通省の基準情報と、  
+        ユーザーがアップロードまたはカメラで撮影した複数枚の画像から抽出されたキャプションを組み合わせ、  
+        総合的な外壁・構造物の状態分析レポートを生成します。  
+        """
     )
     
-    # ユーザーからの質問入力
+    # ユーザー入力：質問
     user_query = st.text_input("質問を入力してください（例: 外壁のひび割れ基準について）")
     
-    # サイドバー：画像アップロード（複数枚対応）
-    st.sidebar.header("画像アップロード (複数枚対応)")
-    input_method = st.sidebar.selectbox("画像入力方法", ["なし", "アップロード", "カメラ撮影"])
+    # サイドバー：画像入力モードの選択
+    st.sidebar.header("画像入力モード")
+    mode = st.sidebar.radio("選択してください", ("ファイルアップロード", "カメラ撮影"))
     
-    images = []
-    if input_method == "アップロード":
+    # ファイルアップロードの場合
+    uploaded_images = []
+    if mode == "ファイルアップロード":
         uploaded_files = st.file_uploader("画像ファイルを選択してください", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
         if uploaded_files:
-            images = [Image.open(file) for file in uploaded_files]
-    elif input_method == "カメラ撮影":
-        captured_image = st.camera_input("カメラで画像を撮影してください")
-        if captured_image is not None:
-            images = [Image.open(captured_image)]
+            uploaded_images = [Image.open(file) for file in uploaded_files]
     
+    # カメラ撮影の場合（複数枚撮影できるようにセッション状態を使用）
+    if mode == "カメラ撮影":
+        if "captured_images" not in st.session_state:
+            st.session_state.captured_images = []
+        st.markdown("**カメラで写真を撮影してください。**")
+        captured = st.camera_input("カメラで写真を撮影（撮影後、自動保存）")
+        if captured is not None:
+            st.session_state.captured_images.append(Image.open(captured))
+            st.experimental_rerun()
+        st.markdown("### 撮影済み画像")
+        cols = st.columns(3)
+        for idx, img in enumerate(st.session_state.captured_images):
+            cols[idx % 3].image(img, caption=f"写真 {idx+1}", use_container_width=True)
+        if st.button("撮影済み画像をクリア", key="clear_images"):
+            st.session_state.captured_images = []
+            st.experimental_rerun()
+    
+    # 利用する画像リストの統合
+    images = []
+    if mode == "ファイルアップロード":
+        images = uploaded_images
+    elif mode == "カメラ撮影":
+        images = st.session_state.get("captured_images", [])
+    
+    # 画像一覧のグリッド表示
     if images:
-        st.subheader("入力画像一覧")
+        st.markdown("### 入力画像一覧")
+        cols = st.columns(4)
         for idx, img in enumerate(images):
-            st.image(img, caption=f"画像 {idx+1}", use_container_width=True)
+            cols[idx % 4].image(img, caption=f"画像 {idx+1}", use_container_width=True)
     
+    # レポート生成ボタン
     if st.button("レポート生成"):
         if not user_query:
             st.error("質問を入力してください。")
@@ -144,7 +181,7 @@ def main():
         # 複数画像のキャプション生成を並列処理で実施
         captions = []
         if images:
-            st.write("画像キャプション生成中です...")
+            st.info("画像キャプション生成中...")
             processor, cap_model = load_caption_model()
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 captions = list(executor.map(lambda img: generate_image_caption(img, processor, cap_model), images))
@@ -152,7 +189,7 @@ def main():
             for i, cap in enumerate(captions):
                 st.write(f"画像 {i+1}: {cap}")
         
-        # PDF からの情報読み込み
+        # PDF 情報の読み込み
         index, chunks, vec_model = load_pdf_index()
         relevant_chunks = search_relevant_chunks(user_query, vec_model, index, chunks)
         context = "\n\n".join(relevant_chunks)
@@ -162,13 +199,13 @@ def main():
         prompt += "以下は Structure_Base.pdf から抽出された関連情報です:\n" + context + "\n\n"
         if captions:
             combined_captions = "\n".join([f"画像 {i+1}: {cap}" for i, cap in enumerate(captions)])
-            prompt += "さらに、アップロードされた画像のキャプションは以下の通りです:\n" + combined_captions + "\n\n"
+            prompt += "さらに、アップロードまたは撮影された画像のキャプションは以下の通りです:\n" + combined_captions + "\n\n"
         prompt += (
             "上記情報を基に、国土交通省の基準に沿った外壁・構造物の状態分析レポートを、"
             "項目ごとに整理された一般的なレポート形式で作成してください。"
         )
         
-        st.write("Gemini API にプロンプトを送信中です…")
+        st.info("Gemini API にプロンプトを送信中です…")
         result = generate_report_with_gemini(prompt)
         if "error" in result:
             st.error(f"API 呼び出しエラー: {result['error']}")
@@ -178,14 +215,14 @@ def main():
             except Exception as e:
                 st.error("レポート抽出中にエラーが発生しました: " + str(e))
                 return
-            st.subheader("生成されたレポート")
+            st.markdown("## 生成されたレポート")
             st.markdown(report_text)
     
     st.sidebar.markdown("---")
     st.sidebar.info(
-        "このシステムは、Structure_Base.pdf の情報と複数の画像から抽出されたキャプションを組み合わせ、"
-        "ユーザーの質問に基づいた多角的なレポートを生成します。\n"
-        "本コードは Python 3.12.9 環境で動作するように調整されています。"
+        "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された複数の画像から抽出されたキャプションを組み合わせ、\n"
+        "ユーザーの質問に基づいた多角的なレポートを生成します。\n\n"
+        "※ カメラ撮影モードでは、撮影後に自動で画像が保存され、[撮影済み画像をクリア] ボタンでリセットできます。"
     )
 
 if __name__ == "__main__":
