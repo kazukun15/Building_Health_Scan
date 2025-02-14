@@ -2,7 +2,7 @@ streamlit
 requests
 PyPDF2
 faiss-cpu
-numpy
+numpy>=1.26.0
 Pillow
 sentence-transformers
 transformers
