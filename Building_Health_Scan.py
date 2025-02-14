@@ -11,7 +11,6 @@ import io
 import faiss
 import numpy as np
 import PyPDF2
-import concurrent.futures
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from transformers import BlipProcessor, BlipForConditionalGeneration
@@ -53,17 +52,10 @@ def load_pdf_index():
     chunks = split_text_into_chunks(text)
     # 空文字列や空白のみ、または非常に短いチャンクは除外
     chunks = [chunk for chunk in chunks if chunk.strip() and len(chunk.strip()) > 5]
-    # 追加: トークナイザーを使って各チャンクを検証（SentenceTransformerのトークナイザーを利用）
+    st.write(f"PDF から抽出した有効なテキストチャンク数: {len(chunks)}")
     vec_model = SentenceTransformer('all-MiniLM-L6-v2')
-    tokenizer = vec_model.tokenizer
-    valid_chunks = []
-    for chunk in chunks:
-        tokens = tokenizer.encode(chunk, add_special_tokens=True)
-        if len(tokens) > 0:
-            valid_chunks.append(chunk)
-    st.write(f"PDF から抽出した有効なテキストチャンク数: {len(valid_chunks)}")
-    index = create_vector_index(valid_chunks, vec_model)
-    return index, valid_chunks, vec_model
+    index = create_vector_index(chunks, vec_model)
+    return index, chunks, vec_model
 
 def search_relevant_chunks(query, model, index, chunks, top_k=3):
     """ユーザーのクエリに基づき、関連チャンクを FAISS から検索"""
@@ -83,8 +75,8 @@ def load_caption_model():
 
 def generate_image_caption(image, processor, model):
     """
-    1 枚の画像からキャプション生成
-    ・画像は最大幅 800px にリサイズし、RGB に変換
+    1 枚の画像からキャプション生成  
+    ・画像は最大幅 800px にリサイズし、RGB に変換  
     ・BLIP には単一画像の場合もリストとして渡し、padding=True を指定
     """
     max_width = 800
@@ -127,7 +119,7 @@ def main():
     st.markdown(
         """
         このアプリは、**Structure_Base.pdf** に含まれる国土交通省の基準情報と、  
-        ユーザーがアップロードまたはカメラで撮影した複数枚の画像から抽出されたキャプションを組み合わせ、  
+        ユーザーがアップロードまたはカメラで撮影した**1枚の画像**から抽出されたキャプションを組み合わせ、  
         総合的な外壁・構造物の状態分析レポートを生成します。  
         """
     )
@@ -139,60 +131,39 @@ def main():
     st.sidebar.header("画像入力モード")
     mode = st.sidebar.radio("選択してください", ("ファイルアップロード", "カメラ撮影"))
     
-    # 画像入力：ファイルアップロード
-    uploaded_images = []
+    # 画像入力：ファイルアップロード（1枚のみ）
+    image = None
     if mode == "ファイルアップロード":
-        uploaded_files = st.file_uploader("画像ファイルを選択してください", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-        if uploaded_files:
-            uploaded_images = [Image.open(file) for file in uploaded_files]
+        image_file = st.file_uploader("画像ファイルを選択してください", type=["jpg", "jpeg", "png"], accept_multiple_files=False)
+        if image_file is not None:
+            image = Image.open(image_file)
     
-    # 画像入力：カメラ撮影（複数枚撮影できるようにセッション状態を利用）
+    # 画像入力：カメラ撮影（1枚のみ）
     if mode == "カメラ撮影":
-        if "captured_images" not in st.session_state:
-            st.session_state.captured_images = []
-        st.markdown("**カメラで写真を撮影してください。**")
-        captured = st.camera_input("カメラで写真を撮影（撮影後、自動で追加されます）")
-        if captured is not None:
-            st.session_state.captured_images.append(Image.open(captured))
-        st.markdown("### 撮影済み画像")
-        cols = st.columns(3)
-        for idx, img in enumerate(st.session_state.captured_images):
-            cols[idx % 3].image(img, caption=f"写真 {idx+1}", use_container_width=True)
-        if st.button("撮影済み画像をクリア", key="clear_images"):
-            st.session_state.captured_images = []
+        image = st.camera_input("カメラで写真を撮影してください")
+        if image is not None:
+            image = Image.open(image)
     
-    # 統合する画像リスト
-    images = []
-    if mode == "ファイルアップロード":
-        images = uploaded_images
-    elif mode == "カメラ撮影":
-        images = st.session_state.get("captured_images", [])
-    
-    if images:
-        st.markdown("### 入力画像一覧")
-        cols = st.columns(4)
-        for idx, img in enumerate(images):
-            cols[idx % 4].image(img, caption=f"画像 {idx+1}", use_container_width=True)
+    if image is not None:
+        st.markdown("### 入力画像")
+        st.image(image, caption="選択された画像", use_container_width=True)
     
     if st.button("レポート生成"):
         if not user_query:
             st.error("質問を入力してください。")
             return
         
-        # 画像キャプション生成を順次実行
-        captions = []
-        if images:
+        # 画像キャプション生成（1枚のみ順次処理）
+        caption = ""
+        if image is not None:
             st.info("画像キャプション生成中...")
             processor, cap_model = load_caption_model()
-            for img in images:
-                try:
-                    cap = generate_image_caption(img, processor, cap_model)
-                    captions.append(cap)
-                except Exception as e:
-                    captions.append(f"エラー: {e}")
-            st.write("生成された各画像のキャプション:")
-            for i, cap in enumerate(captions):
-                st.write(f"画像 {i+1}: {cap}")
+            try:
+                caption = generate_image_caption(image, processor, cap_model)
+            except Exception as e:
+                caption = f"エラー: {e}"
+            st.write("生成された画像のキャプション:")
+            st.write(caption)
         
         # PDF からの情報読み込み
         index, chunks, vec_model = load_pdf_index()
@@ -202,9 +173,8 @@ def main():
         # プロンプト作成（ユーザーの質問、PDF 情報、画像キャプションの統合）
         prompt = f"ユーザーの質問: {user_query}\n\n"
         prompt += "以下は Structure_Base.pdf から抽出された関連情報です:\n" + context + "\n\n"
-        if captions:
-            combined_captions = "\n".join([f"画像 {i+1}: {cap}" for i, cap in enumerate(captions)])
-            prompt += "さらに、アップロードまたは撮影された画像のキャプションは以下の通りです:\n" + combined_captions + "\n\n"
+        if caption:
+            prompt += "さらに、アップロードまたは撮影された画像のキャプションは以下の通りです:\n" + caption + "\n\n"
         prompt += (
             "上記情報を基に、国土交通省の基準に沿った外壁・構造物の状態分析レポートを、"
             "項目ごとに整理された一般的なレポート形式で作成してください。"
@@ -225,9 +195,8 @@ def main():
     
     st.sidebar.markdown("---")
     st.sidebar.info(
-        "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された複数の画像から抽出されたキャプションを組み合わせ、\n"
-        "ユーザーの質問に基づいた多角的なレポートを生成します。\n\n"
-        "※ カメラ撮影モードでは、撮影後に自動で画像が追加され、[撮影済み画像をクリア] ボタンでリセットできます。"
+        "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された1枚の画像から抽出されたキャプションを組み合わせ、\n"
+        "ユーザーの質問に基づいた多角的なレポートを生成します。"
     )
 
 if __name__ == "__main__":
