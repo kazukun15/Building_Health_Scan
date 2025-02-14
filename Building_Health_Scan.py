@@ -1,4 +1,4 @@
-# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、zipimporter を代用
+# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、代わりに zipimporter を設定
 import pkgutil
 if not hasattr(pkgutil, "ImpImporter"):
     pkgutil.ImpImporter = pkgutil.zipimporter
@@ -35,8 +35,11 @@ def split_text_into_chunks(text, max_length=500):
     return [text[i:i+max_length] for i in range(0, len(text), max_length)]
 
 def create_vector_index(chunks, model):
-    """各チャンクをベクトル化して FAISS インデックスを作成"""
-    embeddings = model.encode(chunks, convert_to_numpy=True)
+    """
+    各チャンクをバッチ処理（batch_size=32）でエンコードし、
+    FAISS インデックスを作成する。
+    """
+    embeddings = model.encode(chunks, convert_to_numpy=True, batch_size=32)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
@@ -45,14 +48,14 @@ def create_vector_index(chunks, model):
 @st.cache_resource(show_spinner=False)
 def load_pdf_index():
     """
-    Structure_Base.pdf からテキスト抽出、チャンク分割、ベクトル化、インデックス作成
+    Structure_Base.pdf からテキスト抽出、チャンク分割、フィルタリング、ベクトル化、インデックス作成
     ※ Structure_Base.pdf はプロジェクトルートに配置してください
     """
     pdf_path = "Structure_Base.pdf"
     text = extract_text_from_pdf(pdf_path)
     chunks = split_text_into_chunks(text)
-    # 空のチャンクや空白のみのチャンクは除外する
-    chunks = [chunk for chunk in chunks if chunk.strip()]
+    # 空文字列、空白のみ、または非常に短いチャンクは除外
+    chunks = [chunk for chunk in chunks if chunk.strip() and len(chunk.strip()) > 5]
     st.write(f"PDF から抽出した有効なテキストチャンク数: {len(chunks)}")
     vec_model = SentenceTransformer('all-MiniLM-L6-v2')
     index = create_vector_index(chunks, vec_model)
@@ -76,8 +79,8 @@ def load_caption_model():
 
 def generate_image_caption(image, processor, model):
     """
-    1 枚の画像からキャプション生成  
-    ・画像は最大幅 800px にリサイズし、RGB に変換  
+    1 枚の画像からキャプション生成
+    ・画像は最大幅 800px にリサイズし、RGB に変換
     ・BLIP には単一画像の場合もリストとして渡し、padding=True を指定
     """
     max_width = 800
@@ -87,7 +90,7 @@ def generate_image_caption(image, processor, model):
         image = image.resize(new_size)
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    # 単一画像をリストに包んで渡し、padding=True を指定
+    # 単一画像をリストに包み、padding=True を指定
     inputs = processor([image], return_tensors="pt", padding=True)
     out = model.generate(**inputs)
     caption = processor.decode(out[0], skip_special_tokens=True)
@@ -173,12 +176,11 @@ def main():
             st.error("質問を入力してください。")
             return
         
-        # 複数画像のキャプション生成を順次実行
+        # 画像キャプション生成（順次処理）
         captions = []
         if images:
             st.info("画像キャプション生成中...")
             processor, cap_model = load_caption_model()
-            captions = []
             for img in images:
                 try:
                     cap = generate_image_caption(img, processor, cap_model)
