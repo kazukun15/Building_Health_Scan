@@ -5,11 +5,12 @@ from PIL import Image
 
 def generate_analysis_report(prompt_text):
     """
-    Gemini API (gemini-2.0-flash) を呼び出して、テキストプロンプトに基づく解析レポートを生成する関数
+    Gemini API (gemini-2.0-flash) を呼び出して、
+    テキストプロンプトに基づく解析レポートを生成する関数
     """
-    # st.secrets から API キーを取得（.streamlit/secrets.toml に設定済み）
+    # st.secrets から API キーを取得
     api_key = st.secrets["gemini"]["API_KEY"]
-    # Gemini-2.0-flash のエンドポイントURLを作成
+    # Gemini API エンドポイント（モデル: gemini-2.0-flash）
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     
     headers = {"Content-Type": "application/json"}
@@ -25,14 +26,15 @@ def generate_analysis_report(prompt_text):
     
     try:
         response = requests.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()  # HTTPエラーが発生した場合は例外
+        response.raise_for_status()  # HTTPエラーがあれば例外発生
         return response.json()
     except Exception as e:
         return {"error": str(e)}
 
 def main():
     st.title("Facade Insight")
-    st.write("外壁や物体の状態を分析するアプリです。写真をアップロードまたは撮影し、国土交通省基準に基づく詳細なレポートを生成します。")
+    st.write("外壁や物体の状態を分析するアプリです。"
+             "写真をアップロードまたは撮影し、国土交通省基準に基づく詳細なレポートを生成します。")
     
     # サイドバーで画像入力方法を選択
     st.sidebar.header("画像入力オプション")
@@ -48,7 +50,7 @@ def main():
         if captured_image is not None:
             image = Image.open(captured_image)
     
-    # 画像が選択されている場合、画面上に表示
+    # 画像が選択された場合、表示する
     if image is not None:
         st.subheader("入力画像")
         st.image(image, caption="選択された画像", use_column_width=True)
@@ -59,7 +61,9 @@ def main():
             st.error("画像が選択されていません。画像をアップロードまたは撮影してください。")
         else:
             st.write("分析中です。しばらくお待ちください...")
-            # 画像そのものはAPIに送信できないため、画像に基づいたシナリオを想定したプロンプトを作成
+            
+            # ※ 現状、Gemini API には画像データ自体は送信できないため、
+            # 画像に基づいたシナリオを想定するテキストプロンプトを生成します。
             prompt = (
                 "以下の画像に基づいて、国土交通省の基準に沿い外壁や物体の状態を分析してください。"
                 "非破壊検査、建築業、材料学の専門知識を用い、劣化度をA、B、C、Dなどで定量的に評価し、"
@@ -70,17 +74,15 @@ def main():
             # Gemini API を呼び出して解析結果を取得
             result = generate_analysis_report(prompt)
             
-            # エラーがあれば表示
             if "error" in result:
-                st.error(f"API 呼び出しエラー: {result['error']}")
+                st.error(f"API呼び出しエラー: {result['error']}")
             else:
                 st.subheader("分析結果")
-                # レスポンス内容を JSON として表示（必要に応じてパースして整形表示してください）
                 st.json(result)
     
     st.sidebar.markdown("---")
     st.sidebar.info(
-        "このアプリは、Streamlit と Gemini API (gemini-2.0-flash) を利用して外壁や物体の状態を分析します。"
+        "このアプリは Streamlit と Gemini API (gemini-2.0-flash) を利用して外壁や物体の状態を分析します。\n"
         "API キーは st.secrets を利用して安全に管理されています。"
     )
 
