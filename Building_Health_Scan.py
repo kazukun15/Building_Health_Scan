@@ -1,13 +1,12 @@
+# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、代わりに zipimporter を設定
+import pkgutil
+if not hasattr(pkgutil, "ImpImporter"):
+    pkgutil.ImpImporter = pkgutil.zipimporter
+
 import sys
 import streamlit as st
 
-# Python バージョンチェック
-if sys.version_info >= (3, 12):
-    st.error(
-        "このアプリはPython 3.11環境で動作するよう設計されています。"
-        "現在のPythonバージョンは {}.{}.{} です。Python 3.11 で実行してください。".format(*sys.version_info[:3])
-    )
-    st.stop()
+# Python バージョンチェックは削除（Python 3.12.9 で実行する前提）
 
 import requests
 import json
@@ -20,11 +19,9 @@ from PIL import Image
 from sentence_transformers import SentenceTransformer
 from transformers import BlipProcessor, BlipForConditionalGeneration
 
-# ============================
-# PDFからのテキスト抽出と処理
-# ============================
+# --------------- PDF からのテキスト抽出と処理 ---------------
 def extract_text_from_pdf(pdf_path):
-    """PDFから全ページのテキストを抽出"""
+    """PDF から全ページのテキストを抽出"""
     text = ""
     with open(pdf_path, "rb") as f:
         reader = PyPDF2.PdfReader(f)
@@ -35,46 +32,50 @@ def extract_text_from_pdf(pdf_path):
     return text
 
 def split_text_into_chunks(text, max_length=500):
-    """テキストを一定文字数ごとにチャンクに分割"""
+    """テキストを max_length 文字ごとにチャンクに分割"""
     return [text[i:i+max_length] for i in range(0, len(text), max_length)]
 
 def create_vector_index(chunks, model):
-    """各チャンクをベクトル化してFAISSインデックスを作成"""
+    """各チャンクをベクトル化して FAISS インデックスを作成"""
     embeddings = model.encode(chunks, convert_to_numpy=True)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
-    return index, embeddings
+    return index
 
 @st.cache_resource(show_spinner=False)
 def load_pdf_index():
-    """Structure_Base.pdfからテキスト抽出、チャンク分割、ベクトル化、インデックス作成"""
-    pdf_path = "Structure_Base.pdf"  # GitHubに配置したPDF
+    """
+    Structure_Base.pdf からテキスト抽出、チャンク分割、ベクトル化、インデックス作成
+    ※ Structure_Base.pdf はプロジェクトルートに配置してください
+    """
+    pdf_path = "Structure_Base.pdf"
     text = extract_text_from_pdf(pdf_path)
     chunks = split_text_into_chunks(text)
-    st.write(f"PDFから抽出したテキストチャンク数: {len(chunks)}")
+    st.write(f"PDF から抽出したテキストチャンク数: {len(chunks)}")
     vec_model = SentenceTransformer('all-MiniLM-L6-v2')
-    index, embeddings = create_vector_index(chunks, vec_model)
+    index = create_vector_index(chunks, vec_model)
     return index, chunks, vec_model
 
 def search_relevant_chunks(query, model, index, chunks, top_k=3):
-    """ユーザーのクエリに基づき、関連チャンクをFAISSから検索"""
+    """ユーザーのクエリに基づき、関連チャンクを FAISS から検索"""
     query_vec = model.encode([query], convert_to_numpy=True)
     distances, indices = index.search(query_vec, top_k)
     return [chunks[i] for i in indices[0] if i < len(chunks)]
 
-# ============================
-# 画像キャプション生成
-# ============================
+# --------------- 画像キャプション生成 ---------------
 @st.cache_resource(show_spinner=False)
 def load_caption_model():
-    """BLIPの画像キャプションモデルとプロセッサのロード"""
+    """BLIP の画像キャプションモデルとプロセッサのロード"""
     processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
     return processor, model
 
 def generate_image_caption(image, processor, model):
-    """1枚の画像からキャプション生成。画像はRGBに変換し、リサイズも実施（最大幅800px）"""
+    """
+    1 枚の画像からキャプション生成
+    ・画像は最大幅 800px にリサイズし、RGB に変換
+    """
     max_width = 800
     if image.width > max_width:
         ratio = max_width / image.width
@@ -87,23 +88,16 @@ def generate_image_caption(image, processor, model):
     caption = processor.decode(out[0], skip_special_tokens=True)
     return caption
 
-# ============================
-# Gemini API 呼び出し
-# ============================
+# --------------- Gemini API 呼び出し ---------------
 def generate_report_with_gemini(prompt_text):
     """Gemini API (gemini-2.0-flash) を呼び出してレポート生成"""
     try:
         api_key = st.secrets["gemini"]["API_KEY"]
     except KeyError:
-        return {"error": "Gemini API Key is missing. Please add it to your .streamlit/secrets.toml file."}
-    
+        return {"error": "Gemini API Key が .streamlit/secrets.toml に設定されていません。"}
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt_text}]}
-        ]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     try:
         response = requests.post(endpoint, headers=headers, json=payload)
         response.raise_for_status()
@@ -111,11 +105,9 @@ def generate_report_with_gemini(prompt_text):
     except Exception as e:
         return {"error": str(e)}
 
-# ============================
-# Streamlitアプリメイン
-# ============================
+# --------------- Streamlit アプリメイン ---------------
 def main():
-    st.title("多角的レポート生成システム")
+    st.title("多角的レポート生成システム (Python 3.12.9 対応)")
     st.write(
         "このアプリは、Structure_Base.pdf に含まれる国土交通省の基準情報と、"
         "ユーザーがアップロードした複数枚の画像から抽出されたキャプションを組み合わせ、"
@@ -125,7 +117,7 @@ def main():
     # ユーザーからの質問入力
     user_query = st.text_input("質問を入力してください（例: 外壁のひび割れ基準について）")
     
-    # 複数画像のアップロード（accept_multiple_files=True）
+    # サイドバー：画像アップロード（複数枚対応）
     st.sidebar.header("画像アップロード (複数枚対応)")
     input_method = st.sidebar.selectbox("画像入力方法", ["なし", "アップロード", "カメラ撮影"])
     
@@ -149,7 +141,7 @@ def main():
             st.error("質問を入力してください。")
             return
         
-        # 並列処理で各画像のキャプション生成
+        # 複数画像のキャプション生成を並列処理で実施
         captions = []
         if images:
             st.write("画像キャプション生成中です...")
@@ -160,20 +152,17 @@ def main():
             for i, cap in enumerate(captions):
                 st.write(f"画像 {i+1}: {cap}")
         
-        # PDFからRAGに利用するインデックスの読み込み
+        # PDF からの情報読み込み
         index, chunks, vec_model = load_pdf_index()
         relevant_chunks = search_relevant_chunks(user_query, vec_model, index, chunks)
         context = "\n\n".join(relevant_chunks)
         
-        # プロンプト作成：ユーザーの質問、PDFからの情報、複数画像キャプションを統合
-        prompt = (
-            f"ユーザーの質問: {user_query}\n\n"
-            "以下は、Structure_Base.pdf から抽出された関連情報です:\n"
-            f"{context}\n\n"
-        )
+        # プロンプト作成（ユーザーの質問、PDF 情報、画像キャプションの統合）
+        prompt = f"ユーザーの質問: {user_query}\n\n"
+        prompt += "以下は Structure_Base.pdf から抽出された関連情報です:\n" + context + "\n\n"
         if captions:
             combined_captions = "\n".join([f"画像 {i+1}: {cap}" for i, cap in enumerate(captions)])
-            prompt += f"さらに、アップロードされた画像のキャプションは以下の通りです:\n{combined_captions}\n\n"
+            prompt += "さらに、アップロードされた画像のキャプションは以下の通りです:\n" + combined_captions + "\n\n"
         prompt += (
             "上記情報を基に、国土交通省の基準に沿った外壁・構造物の状態分析レポートを、"
             "項目ごとに整理された一般的なレポート形式で作成してください。"
@@ -181,24 +170,22 @@ def main():
         
         st.write("Gemini API にプロンプトを送信中です…")
         result = generate_report_with_gemini(prompt)
-        
         if "error" in result:
-            st.error(f"API呼び出しエラー: {result['error']}")
+            st.error(f"API 呼び出しエラー: {result['error']}")
         else:
             try:
                 report_text = result["candidates"][0]["content"]["parts"][0]["text"]
             except Exception as e:
                 st.error("レポート抽出中にエラーが発生しました: " + str(e))
                 return
-            
             st.subheader("生成されたレポート")
             st.markdown(report_text)
     
     st.sidebar.markdown("---")
     st.sidebar.info(
-        "このシステムは、Structure_Base.pdf の情報と、複数の画像から抽出されたキャプションを組み合わせ、"
+        "このシステムは、Structure_Base.pdf の情報と複数の画像から抽出されたキャプションを組み合わせ、"
         "ユーザーの質問に基づいた多角的なレポートを生成します。\n"
-        "処理負荷対策として、画像キャプションは並列処理およびリサイズを実施しています。"
+        "本コードは Python 3.12.9 環境で動作するように調整されています。"
     )
 
 if __name__ == "__main__":
