@@ -9,8 +9,11 @@ def generate_analysis_report(prompt_text):
     Gemini API (gemini-2.0-flash) を呼び出し、
     テキストプロンプトに基づく解析レポートを生成する関数
     """
-    # st.secrets から API キーを取得
-    api_key = st.secrets["gemini"]["API_KEY"]
+    try:
+        api_key = st.secrets["gemini"]["API_KEY"]
+    except KeyError:
+        return {"error": "Gemini API Key is missing. Please add it to your .streamlit/secrets.toml file."}
+    
     # Gemini API エンドポイント（モデル: gemini-2.0-flash）
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     
@@ -65,7 +68,6 @@ def main():
         else:
             st.write("分析中です。しばらくお待ちください...")
             
-            # 画像をバイナリデータに変換する処理が必要な場合
             # 画像をJPEG形式で保存する前にRGBモードに変換
             if image.mode != 'RGB':
                 image = image.convert('RGB')
