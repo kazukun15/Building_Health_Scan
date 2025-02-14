@@ -50,19 +50,12 @@ def load_pdf_index():
     pdf_path = "Structure_Base.pdf"
     text = extract_text_from_pdf(pdf_path)
     chunks = split_text_into_chunks(text)
-    # 空文字、空白のみ、非常に短いチャンクを除外
+    # 空文字、空白のみ、または非常に短いチャンクを除外
     chunks = [chunk for chunk in chunks if chunk.strip() and len(chunk.strip()) > 5]
-    # 追加検証：トークナイザーで有効かチェック
+    st.write(f"PDFから抽出した有効なテキストチャンク数: {len(chunks)}")
     vec_model = SentenceTransformer('all-MiniLM-L6-v2')
-    tokenizer = vec_model.tokenizer
-    valid_chunks = []
-    for chunk in chunks:
-        tokens = tokenizer.encode(chunk, add_special_tokens=True)
-        if len(tokens) > 0:
-            valid_chunks.append(chunk)
-    st.write(f"PDFから抽出した有効なテキストチャンク数: {len(valid_chunks)}")
-    index = create_vector_index(valid_chunks, vec_model)
-    return index, valid_chunks, vec_model
+    index = create_vector_index(chunks, vec_model)
+    return index, chunks, vec_model
 
 def search_relevant_chunks(query, model, index, chunks, top_k=3):
     """ユーザーのクエリに基づき、関連チャンクをFAISSから検索"""
@@ -122,16 +115,15 @@ def generate_report_with_gemini(prompt_text):
 # -------------------------------
 def main():
     st.set_page_config(page_title="多角的レポート生成システム", layout="wide")
-    st.title("多角的レポート生成システム")
+    st.title("多角的レポート生成システム (Python 3.12.9 対応)")
     st.markdown(
         """
         このアプリは、**Structure_Base.pdf** に含まれる国土交通省の基準情報と、  
         ユーザーがアップロードまたはカメラで撮影した1枚の画像から抽出されたキャプションを組み合わせ、  
         国土交通省の基準に基づいた外壁・構造物の状態分析レポートを生成します。  
         
-        ※ AIには「非破壊検査」「建築業」「材料学」の専門知識を与えており、  
-        不明な部分はインターネット検索で補完、ハルシネーションは絶対に避けるよう指示します。  
-        また、劣化度はA～Dで定量化し、総合的に判断した推定寿命も表示します。
+        ※ AIには「非破壊検査」「建築業」「材料学」の専門知識を与え、不明な部分はインターネット検索で補完し、ハルシネーションは絶対に避けるよう指示しています。  
+        また、劣化度をA～Dで定量化し、総合的に判断した推定寿命も表示します。  
         """
     )
     
@@ -148,7 +140,7 @@ def main():
         st.subheader("カメラ撮影")
         image_capture = st.camera_input("カメラで写真を撮影してください", key="camera")
     
-    # どちらか優先：撮影画像があればそちら、なければアップロード画像
+    # 撮影画像があれば優先して採用、なければアップロード画像
     image = None
     if image_capture is not None:
         image = Image.open(image_capture)
@@ -157,7 +149,6 @@ def main():
     
     if image is not None:
         st.image(image, caption="選択された画像", use_container_width=True)
-        # 画像キャプション生成
         processor, cap_model = load_caption_model()
         try:
             caption = generate_image_caption(image, processor, cap_model)
@@ -173,22 +164,21 @@ def main():
             st.error("質問を入力してください。")
             return
         
-        # PDFから情報読み込み
+        # PDFからの情報読み込み
         index, chunks, vec_model = load_pdf_index()
         relevant_chunks = search_relevant_chunks(user_query, vec_model, index, chunks)
         context = "\n\n".join(relevant_chunks)
         
-        # プロンプト作成
+        # プロンプト作成（ユーザーの質問、PDF情報、画像キャプションの統合）
         prompt = f"ユーザーの質問: {user_query}\n\n"
         prompt += "以下は Structure_Base.pdf から抽出された関連情報です:\n" + context + "\n\n"
         if caption:
             prompt += "さらに、アップロードまたは撮影された画像のキャプションは以下の通りです:\n" + caption + "\n\n"
         prompt += (
             "上記情報を基に、非破壊検査、建築業、材料学の専門知識を活用し、"
-            "不明な部分はインターネット検索で補完、ハルシネーションは絶対に避け、"
-            "国土交通省の基準に沿った外壁・構造物の状態分析レポートを、"
-            "劣化度をA～Dで定量化し、総合的に判断した推定寿命も含めた形で、"
-            "項目ごとに整理された一般的なレポート形式で作成してください。"
+            "不明な部分はインターネット検索で補完し、ハルシネーションは絶対に避け、"
+            "国土交通省の基準に沿った外壁・構造物の状態分析レポートを作成してください。\n"
+            "また、劣化度はA～Dで定量化し、総合的に判断した推定寿命も明示してください。"
         )
         
         st.info("Gemini API にプロンプトを送信中です…")
@@ -201,15 +191,28 @@ def main():
             except Exception as e:
                 st.error("レポート抽出中にエラーが発生しました: " + str(e))
                 return
-            st.markdown("## 生成されたレポート")
-            st.markdown(report_text)
             
-            # レポート共有機能：テキストファイルとしてダウンロード可能にする
+            # レポートを行ごとに分割し、最初の数行を概要（総合評価）として表示、詳細はExpanderに隠す
+            report_lines = report_text.splitlines()
+            if len(report_lines) > 5:
+                summary = "\n".join(report_lines[:5])
+                details = "\n".join(report_lines[5:])
+            else:
+                summary = report_text
+                details = ""
+            
+            st.markdown("## 総合評価 (概要)")
+            st.markdown(summary)
+            if details:
+                with st.expander("詳細を表示"):
+                    st.markdown(details)
+            
+            # レポート共有機能：ダウンロードボタン
             st.download_button("レポートをダウンロード", report_text, file_name="report.txt", mime="text/plain")
     
     st.markdown("---")
     st.info(
-        "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された画像から抽出されたキャプションを組み合わせ、\n"
+        "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された1枚の画像から抽出されたキャプションを組み合わせ、\n"
         "ユーザーの質問に基づいた外壁・構造物の状態分析レポートを生成します。"
     )
 
