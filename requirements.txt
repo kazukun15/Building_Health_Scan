@@ -2,8 +2,5 @@ streamlit
 requests
 PyPDF2
 faiss-cpu
-numpy>=1.26.0
-Pillow
 sentence-transformers
-transformers
-torch==2.2.0
+torch
