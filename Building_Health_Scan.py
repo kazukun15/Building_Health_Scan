@@ -1,4 +1,4 @@
-# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、代わりに zipimporter を設定
+# monkey patch: Python 3.12 では pkgutil.ImpImporter が削除されているため、zipimporter を代用
 import pkgutil
 if not hasattr(pkgutil, "ImpImporter"):
     pkgutil.ImpImporter = pkgutil.zipimporter
@@ -11,6 +11,7 @@ import io
 import faiss
 import numpy as np
 import PyPDF2
+import concurrent.futures
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from transformers import BlipProcessor, BlipForConditionalGeneration
@@ -44,7 +45,7 @@ def create_vector_index(chunks, model):
 @st.cache_resource(show_spinner=False)
 def load_pdf_index():
     """
-    Structure_Base.pdf からテキスト抽出、チャンク分割、ベクトル化、インデックス作成
+    Structure_Base.pdf からテキスト抽出、チャンク分割、ベクトル化、インデックス作成  
     ※ Structure_Base.pdf はプロジェクトルートに配置してください
     """
     pdf_path = "Structure_Base.pdf"
@@ -73,9 +74,9 @@ def load_caption_model():
 
 def generate_image_caption(image, processor, model):
     """
-    1 枚の画像からキャプション生成
-    ・画像は最大幅 800px にリサイズし、RGB に変換
-    ・BLIP には単一画像の場合もリストとして渡す
+    1 枚の画像からキャプション生成  
+    ・画像は最大幅 800px にリサイズし、RGB に変換  
+    ・BLIP には単一画像の場合もリストとして渡し、padding=True を指定
     """
     max_width = 800
     if image.width > max_width:
@@ -84,7 +85,8 @@ def generate_image_caption(image, processor, model):
         image = image.resize(new_size)
     if image.mode != 'RGB':
         image = image.convert('RGB')
-    inputs = processor([image], return_tensors="pt")
+    # 単一画像をリスト化し、padding=True を指定してテンソル作成
+    inputs = processor([image], return_tensors="pt", padding=True)
     out = model.generate(**inputs)
     caption = processor.decode(out[0], skip_special_tokens=True)
     return caption
@@ -118,7 +120,7 @@ def main():
         """
         このアプリは、**Structure_Base.pdf** に含まれる国土交通省の基準情報と、  
         ユーザーがアップロードまたはカメラで撮影した複数枚の画像から抽出されたキャプションを組み合わせ、  
-        総合的な外壁・構造物の状態分析レポートを生成します。  
+        総合的な外壁・構造物の状態分析レポートを生成します。
         """
     )
     
@@ -169,7 +171,7 @@ def main():
             st.error("質問を入力してください。")
             return
         
-        # 画像キャプション生成を順次実行（並列処理を解除）
+        # 複数画像のキャプション生成を順次実行
         captions = []
         if images:
             st.info("画像キャプション生成中...")
