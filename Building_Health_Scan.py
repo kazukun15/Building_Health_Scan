@@ -11,7 +11,6 @@ import io
 import faiss
 import numpy as np
 import PyPDF2
-import concurrent.futures
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 from transformers import BlipProcessor, BlipForConditionalGeneration
@@ -170,13 +169,18 @@ def main():
             st.error("質問を入力してください。")
             return
         
-        # 複数画像のキャプション生成（並列処理）
+        # 画像キャプション生成を順次実行（並列処理を解除）
         captions = []
         if images:
             st.info("画像キャプション生成中...")
             processor, cap_model = load_caption_model()
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                captions = list(executor.map(lambda img: generate_image_caption(img, processor, cap_model), images))
+            captions = []
+            for img in images:
+                try:
+                    cap = generate_image_caption(img, processor, cap_model)
+                    captions.append(cap)
+                except Exception as e:
+                    captions.append(f"エラー: {e}")
             st.write("生成された各画像のキャプション:")
             for i, cap in enumerate(captions):
                 st.write(f"画像 {i+1}: {cap}")
