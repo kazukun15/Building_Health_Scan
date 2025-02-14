@@ -1,9 +1,12 @@
 import sys
 import streamlit as st
 
-# Pythonバージョンチェック（3.12以上の場合はエラーを出して中断）
+# Python バージョンチェック
 if sys.version_info >= (3, 12):
-    st.error("このアプリはPython 3.11環境で動作するよう設計されています。現在のPythonバージョンは {}.{}.{} です。Python 3.11 で実行してください。".format(*sys.version_info))
+    st.error(
+        "このアプリはPython 3.11環境で動作するよう設計されています。"
+        "現在のPythonバージョンは {}.{}.{} です。Python 3.11 で実行してください。".format(*sys.version_info[:3])
+    )
     st.stop()
 
 import requests
@@ -132,7 +135,6 @@ def main():
         if uploaded_files:
             images = [Image.open(file) for file in uploaded_files]
     elif input_method == "カメラ撮影":
-        # カメラ撮影は現時点で1枚のみ対応の可能性あり
         captured_image = st.camera_input("カメラで画像を撮影してください")
         if captured_image is not None:
             images = [Image.open(captured_image)]
