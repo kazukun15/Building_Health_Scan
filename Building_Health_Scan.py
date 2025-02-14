@@ -97,7 +97,7 @@ def search_relevant_chunks(query, model, index, chunks, top_k=3):
 # Streamlitアプリメイン部分
 # ---------------------------
 def main():
-    st.title("RAGを用いたレポート生成システム")
+    st.title("建物分析君")
     st.write("このアプリは、リポジトリに含まれる Structure_Base.pdf の内容を元に、ユーザーのクエリに対して国土交通省基準に沿ったレポートを生成します。")
     
     # ユーザークエリ入力
