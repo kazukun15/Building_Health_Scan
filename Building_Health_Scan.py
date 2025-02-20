@@ -34,7 +34,10 @@ def split_text_into_chunks(text, max_length=500):
     return [text[i:i+max_length] for i in range(0, len(text), max_length)]
 
 def create_vector_index(chunks, model):
-    """各チャンクをバッチ処理(batch_size=32)でエンコードし、FAISSインデックスを作成"""
+    """
+    各チャンクをバッチ処理(batch_size=32)でエンコードし、FAISSインデックスを作成
+    ※バッチサイズを指定することで、内部の処理を安定化
+    """
     embeddings = model.encode(chunks, convert_to_numpy=True, batch_size=32)
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
@@ -50,12 +53,15 @@ def load_pdf_index():
     pdf_path = "Structure_Base.pdf"
     text = extract_text_from_pdf(pdf_path)
     chunks = split_text_into_chunks(text)
-    # 空文字、空白のみ、または非常に短いチャンクを除外
+    # 空文字、空白のみ、非常に短いチャンクは除外
     chunks = [chunk for chunk in chunks if chunk.strip() and len(chunk.strip()) > 5]
-    st.write(f"PDFから抽出した有効なテキストチャンク数: {len(chunks)}")
+    # さらにSentenceTransformerのトークナイザーで有効性をチェック
     vec_model = SentenceTransformer('all-MiniLM-L6-v2')
-    index = create_vector_index(chunks, vec_model)
-    return index, chunks, vec_model
+    tokenizer = vec_model.tokenizer
+    valid_chunks = [chunk for chunk in chunks if len(tokenizer.encode(chunk, add_special_tokens=True)) > 0]
+    st.write(f"PDFから抽出した有効なテキストチャンク数: {len(valid_chunks)}")
+    index = create_vector_index(valid_chunks, vec_model)
+    return index, valid_chunks, vec_model
 
 def search_relevant_chunks(query, model, index, chunks, top_k=3):
     """ユーザーのクエリに基づき、関連チャンクをFAISSから検索"""
@@ -95,7 +101,10 @@ def generate_image_caption(image, processor, model):
 # Gemini API 呼び出し
 # -------------------------------
 def generate_report_with_gemini(prompt_text):
-    """Gemini API (gemini-2.0-flash) を呼び出してレポート生成"""
+    """
+    Gemini API (gemini-2.0-flash) を呼び出してレポート生成
+    ※Gemini API Keyは .streamlit/secrets.toml に設定してください
+    """
     try:
         api_key = st.secrets["gemini"]["API_KEY"]
     except KeyError:
@@ -119,33 +128,34 @@ def main():
     st.markdown(
         """
         このアプリは、**Structure_Base.pdf** に含まれる国土交通省の基準情報と、  
-        ユーザーがアップロードまたはカメラで撮影した1枚の画像から抽出されたキャプションを組み合わせ、  
+        ユーザーがアップロードまたはカメラで撮影した1枚の画像（赤外線カメラも対応）から抽出されたキャプションを組み合わせ、  
         国土交通省の基準に基づいた外壁・構造物の状態分析レポートを生成します。  
         
         ※ AIには「非破壊検査」「建築業」「材料学」の専門知識を与え、不明な部分はインターネット検索で補完し、ハルシネーションは絶対に避けるよう指示しています。  
-        また、劣化度をA～Dで定量化し、総合的に判断した推定寿命も表示します。  
+        また、劣化度をA～Dで定量化し、総合的に判断した推定寿命も表示します。
         """
     )
     
     # ユーザーの質問入力
     user_query = st.text_input("質問を入力してください（例: 外壁のひび割れ基準について）")
     
-    # 画像入力：ファイルアップロードとカメラ撮影（どちらか1枚を採用）
+    # 画像入力モードの選択（スマートフォン向けにメインエリアに配置）
     st.markdown("### 画像入力")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("ファイルアップロード")
-        image_file = st.file_uploader("画像ファイルを選択してください", type=["jpg", "jpeg", "png"], accept_multiple_files=False, key="upload")
-    with col2:
-        st.subheader("カメラ撮影")
-        image_capture = st.camera_input("カメラで写真を撮影してください", key="camera")
+    mode = st.radio("画像入力モードを選択してください", ("ファイルアップロード", "通常カメラ撮影", "赤外線カメラ撮影"))
     
-    # 撮影画像があれば優先して採用、なければアップロード画像
     image = None
-    if image_capture is not None:
-        image = Image.open(image_capture)
-    elif image_file is not None:
-        image = Image.open(image_file)
+    if mode == "ファイルアップロード":
+        image_file = st.file_uploader("画像ファイルを選択してください", type=["jpg", "jpeg", "png"], accept_multiple_files=False, key="upload")
+        if image_file is not None:
+            image = Image.open(image_file)
+    elif mode == "通常カメラ撮影":
+        image_capture = st.camera_input("カメラで写真を撮影してください", key="camera_normal")
+        if image_capture is not None:
+            image = Image.open(image_capture)
+    elif mode == "赤外線カメラ撮影":
+        image_capture_ir = st.camera_input("赤外線カメラで写真を撮影してください", key="camera_infrared")
+        if image_capture_ir is not None:
+            image = Image.open(image_capture_ir)
     
     if image is not None:
         st.image(image, caption="選択された画像", use_container_width=True)
@@ -169,11 +179,18 @@ def main():
         relevant_chunks = search_relevant_chunks(user_query, vec_model, index, chunks)
         context = "\n\n".join(relevant_chunks)
         
-        # プロンプト作成（ユーザーの質問、PDF情報、画像キャプションの統合）
+        # プロンプト作成
         prompt = f"ユーザーの質問: {user_query}\n\n"
         prompt += "以下は Structure_Base.pdf から抽出された関連情報です:\n" + context + "\n\n"
         if caption:
-            prompt += "さらに、アップロードまたは撮影された画像のキャプションは以下の通りです:\n" + caption + "\n\n"
+            if mode == "赤外線カメラ撮影":
+                prompt += (
+                    "さらに、撮影された**赤外線画像**のキャプションは以下の通りです:\n" + caption + "\n\n"
+                    "※ この画像は赤外線カメラで撮影されたもので、通常の可視光画像とは異なり、"
+                    "温度分布や熱パターン、隠れた湿気、断熱不良、内部損傷の可能性などの情報が含まれています。"
+                )
+            else:
+                prompt += "さらに、アップロードまたは撮影された画像のキャプションは以下の通りです:\n" + caption + "\n\n"
         prompt += (
             "上記情報を基に、非破壊検査、建築業、材料学の専門知識を活用し、"
             "不明な部分はインターネット検索で補完し、ハルシネーションは絶対に避け、"
@@ -192,7 +209,7 @@ def main():
                 st.error("レポート抽出中にエラーが発生しました: " + str(e))
                 return
             
-            # レポートを行ごとに分割し、最初の数行を概要（総合評価）として表示、詳細はExpanderに隠す
+            # レポートの概要と詳細表示：先頭5行を概要、残りはExpander内に隠す
             report_lines = report_text.splitlines()
             if len(report_lines) > 5:
                 summary = "\n".join(report_lines[:5])
@@ -212,8 +229,9 @@ def main():
     
     st.markdown("---")
     st.info(
-        "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された1枚の画像から抽出されたキャプションを組み合わせ、\n"
-        "ユーザーの質問に基づいた外壁・構造物の状態分析レポートを生成します。"
+        "このシステムは、Structure_Base.pdf の情報と、アップロードまたはカメラで撮影された画像から抽出されたキャプションを組み合わせ、\n"
+        "ユーザーの質問に基づいた外壁・構造物の状態分析レポートを生成します。\n"
+        "※ 赤外線カメラ撮影モードの場合、画像は赤外線画像として扱われます。"
     )
 
 if __name__ == "__main__":
