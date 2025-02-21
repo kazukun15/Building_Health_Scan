@@ -132,7 +132,7 @@ def generate_report_with_gemini(prompt_text):
 # -------------------------------
 def main():
     st.set_page_config(page_title="多角的レポート生成システム", layout="wide")
-    st.title("多角的レポート生成システム (Python 3.12.9 対応)")
+    st.title("ファシリティマネジメント　分析ツール")
     st.markdown(
         """
         このアプリは、**Structure_Base.pdf**、**kamijimachou_Public_facility_management_plan.pdf**、および  
