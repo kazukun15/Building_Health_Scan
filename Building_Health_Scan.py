@@ -8,16 +8,36 @@ from sentence_transformers import SentenceTransformer
 from transformers import BlipProcessor, BlipForConditionalGeneration
 
 # -------------------------------
+# 定数定義
+# -------------------------------
+PDF_PATHS = [
+    "Structure_Base.pdf",
+    "kamijimachou_Public_facility_management_plan.pdf",
+    "minatoku_Public_facility_management_plan.pdf"
+]
+EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
+CAPTION_MODEL_NAME = "Salesforce/blip-image-captioning-base"
+GEMINI_MODEL_NAME = "gemini-1.5-flash-latest"
+GEMINI_API_ENDPOINT = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL_NAME}:generateContent"
+
+# -------------------------------
 # PDFからのテキスト抽出と前処理
 # -------------------------------
 def extract_text_from_pdf(pdf_path):
     text = ""
-    with open(pdf_path, "rb") as f:
-        reader = PyPDF2.PdfReader(f)
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+    try:
+        with open(pdf_path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            if reader.is_encrypted:
+                st.warning(f"PDFファイル '{pdf_path}' は暗号化されており、読み取れない可能性があります。")
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+    except FileNotFoundError:
+        st.error(f"PDFファイルが見つかりません: {pdf_path}")
+    except PyPDF2.errors.PdfReadError as e:
+        st.error(f"PDFファイルの読み取りエラー ({pdf_path}): {e}")
     return text
 
 def split_text_into_chunks(text, max_length=500):
@@ -32,21 +52,14 @@ def create_vector_index(chunks, model):
 
 @st.cache_resource(show_spinner=False)
 def load_pdf_index():
-    pdf_paths = [
-        "Structure_Base.pdf",
-        "kamijimachou_Public_facility_management_plan.pdf",
-        "minatoku_Public_facility_management_plan.pdf"
-    ]
     combined_text = ""
-    for path in pdf_paths:
+    for path in PDF_PATHS:
         combined_text += extract_text_from_pdf(path) + "\n"
     chunks = split_text_into_chunks(combined_text)
-    chunks = [chunk for chunk in chunks if chunk.strip() and len(chunk.strip()) > 5]
-    vec_model = SentenceTransformer('all-MiniLM-L6-v2')
-    tokenizer = vec_model.tokenizer
-    valid_chunks = [chunk for chunk in chunks if len(tokenizer.encode(chunk, add_special_tokens=True)) > 0]
-    index = create_vector_index(valid_chunks, vec_model)
-    return index, valid_chunks, vec_model
+    chunks = [chunk for chunk in chunks if chunk.strip()]
+    vec_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    index = create_vector_index(chunks, vec_model)
+    return index, chunks, vec_model
 
 def search_relevant_chunks(query, model, index, chunks, top_k=3):
     query_vec = model.encode([query], convert_to_numpy=True)
@@ -58,8 +71,8 @@ def search_relevant_chunks(query, model, index, chunks, top_k=3):
 # -------------------------------
 @st.cache_resource(show_spinner=False)
 def load_caption_model():
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    processor = BlipProcessor.from_pretrained(CAPTION_MODEL_NAME)
+    model = BlipForConditionalGeneration.from_pretrained(CAPTION_MODEL_NAME)
     return processor, model
 
 def generate_image_caption(image, processor, model):
@@ -71,10 +84,10 @@ def generate_image_caption(image, processor, model):
     if image.mode != 'RGB':
         image = image.convert('RGB')
     prompt = (
-        "Describe in detail the current state of the wall and floor in the image, "
-        "including cracks, stains, bulges, peeling, discoloration, or any notable damage, "
-        "as if you are an experienced building inspector in Japan. "
-        "Output in Japanese."
+        "画像内の壁と床の現在の状態を詳細に説明してください。"
+        "ひび割れ、汚れ、膨らみ、剥がれ、変色、その他の目立つ損傷などを含めて、"
+        "日本の経験豊富な建物検査官のように記述してください。"
+        "出力は日本語でお願いします。"
     )
     inputs = processor([image], text=prompt, return_tensors="pt", padding=True)
     out = model.generate(**inputs)
@@ -88,18 +101,20 @@ def generate_report_with_gemini(prompt_text):
     try:
         api_key = st.secrets["gemini"]["API_KEY"]
     except KeyError:
-        return {"error": "Gemini API Keyが .streamlit/secrets.toml に設定されていません。"}
-    endpoint = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-2.0-flash-preview-image-generation:generateContent?key=" + api_key
-    )
+        st.error("Gemini API Keyが .streamlit/secrets.toml に設定されていません。")
+        return None
+    endpoint = f"{GEMINI_API_ENDPOINT}?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
     try:
         response = requests.post(endpoint, headers=headers, json=payload)
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"APIリクエストエラー: {e}")
+        return {"error": str(e)}
     except Exception as e:
+        st.error(f"予期せぬエラーが発生しました: {e}")
         return {"error": str(e)}
 
 # -------------------------------
@@ -155,18 +170,22 @@ if st.button("レポート生成"):
             f"画像キャプション:\n{caption}\n\n"
             f"壁の補足情報:\n{wall_note}\n\n"
             f"床の補足情報:\n{floor_note}\n\n"
-            "上記の情報を基に、壁と床の状態を詳細に分析し、劣化度（A～D）、推定寿命、必要な対策、注意点を含むレポートを日本語で作成してください。"
-        )
-
-        with st.spinner("Gemini APIでレポートを生成中..."):
-            result = generate_report_with_gemini(prompt)
-            if "error" in result:
-                st.error(f"API呼び出しエラー: {result['error']}")
-            else:
-                try:
-                    report_text = result["candidates"][0]["content"]["parts"][0]["text"]
-                    st.markdown("## 生成されたレポート")
-                    st.markdown(report_text)
-                    st.download_button("レポートをダウンロード", report_text, file_name="report.txt", mime="text/plain")
-                except Exception as e:
-                    st.error("レポート抽出中にエラーが発生しました: " + str(e))
+            "上記の情報を基に、壁と床の状態を詳細に分析し、以下のMarkdown形式でレポートを作成してください:\n"
+            "## 1. 壁の状態分析\n"
+            "### 1.1. 現状\n"
+            "(ここに壁の現状を記述)\n"
+            "### 1.2. 劣化度\n"
+            "評価: (A～Dで評価)\n"
+            "### 1.3. 推定寿命\n"
+            "(ここに推定寿命を記述)\n"
+            "### 1.4. 必要な対策\n"
+            "(ここに具体的な対策を記述)\n"
+            "### 1.5. 注意点\n"
+            "(ここに注意点を記述)\n"
+            "## 2. 床の状態分析\n"
+            "### 2.1. 現状\n"
+            "(ここに床の現状を記述)\n"
+            "### 2.2. 劣化度\n"
+            "評価:
+::contentReference[oaicite:17]{index=17}
+ 
