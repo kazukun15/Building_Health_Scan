@@ -87,6 +87,7 @@ def generate_image_caption(image, processor, model):
         "画像内の壁と床の現在の状態を詳細に説明してください。"
         "ひび割れ、汚れ、膨らみ、剥がれ、変色、その他の目立つ損傷などを含めて、"
         "日本の経験豊富な建物検査官のように記述してください。"
+        "一般常識を踏まえての観点からの記述をしてください。"
         "出力は日本語でお願いします。"
     )
     inputs = processor([image], text=prompt, return_tensors="pt", padding=True)
@@ -120,8 +121,8 @@ def generate_report_with_gemini(prompt_text):
 # -------------------------------
 # Streamlit アプリメイン
 # -------------------------------
-st.set_page_config(page_title="壁・床状態分析ツール", layout="wide")
-st.title("壁・床の状態分析レポート生成ツール")
+st.set_page_config(page_title="施設状態分析ツール", layout="wide")
+st.title("施設の状態分析レポート生成ツール")
 
 st.markdown(
     """
@@ -186,6 +187,11 @@ if st.button("レポート生成"):
             "### 2.1. 現状\n"
             "(ここに床の現状を記述)\n"
             "### 2.2. 劣化度\n"
-            "評価:
-::contentReference[oaicite:17]{index=17}
+            "評価: (A～Dで評価)\n"
+            "### 2.3. 推定寿命\n"
+            "(ここに推定寿命を記述)\n"
+            "### 2.4. 必要な対策\n"
+            "(ここに具体的な対策を記述)\n"
+           
+::contentReference[oaicite:35]{index=35}
  
