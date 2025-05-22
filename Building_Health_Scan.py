@@ -84,4 +84,114 @@ def generate_image_caption(image, processor, model):
     output = model.generate(**inputs)
     return processor.decode(output[0], skip_special_tokens=True)
 
-# ---------------
+# -------------------------------
+# Gemini API 呼び出し関連関数
+# -------------------------------
+
+def generate_report_with_gemini(prompt_text):
+    try:
+        api_key = st.secrets["gemini"]["API_KEY"]
+    except KeyError:
+        st.error("Gemini APIキーが設定されていません。")
+        return None
+
+    endpoint = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        "gemini-1.5-flash-latest:generateContent?key=" + api_key
+    )
+
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+    try:
+        response = requests.post(endpoint, headers={"Content-Type": "application/json"}, json=payload)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"APIリクエストエラー: {e}")
+        return None
+
+# -------------------------------
+# Streamlit UI部分
+# -------------------------------
+
+st.set_page_config(page_title="壁・床状態分析ツール", layout="wide")
+st.title("🧱 壁・床状態分析レポート生成ツール")
+
+st.markdown("""
+建物の壁や床の状態をAIが解析し、詳細レポートを生成します。  
+画像をアップロードするか、カメラで撮影してください。
+""")
+
+# 画像入力セクション
+image = None
+with st.expander("📸 画像の入力方法を選択"):
+    image_file = st.file_uploader("画像ファイルをアップロード", type=["jpg", "jpeg", "png"])
+    camera_image = st.camera_input("またはカメラで撮影")
+
+    if image_file:
+        image = Image.open(image_file)
+    elif camera_image:
+        image = Image.open(camera_image)
+
+    if image:
+        st.image(image, caption="使用する画像", use_column_width=True)
+
+# 補足情報入力
+with st.expander("📝 補足情報を入力（任意）"):
+    wall_note = st.text_area("壁に関する補足情報（ひび割れ、変色など）")
+    floor_note = st.text_area("床に関する補足情報（きしみ、沈みなど）")
+    user_query = st.text_input("特に質問したい内容")
+
+# レポート生成
+if st.button("📊 レポート生成開始"):
+    if not image:
+        st.error("画像を入力してください。")
+        st.stop()
+
+    processor, cap_model = load_caption_model()
+
+    with st.spinner("画像を解析中…"):
+        caption = generate_image_caption(image, processor, cap_model)
+    st.success("画像キャプションを生成しました。")
+    st.write(caption)
+
+    index, chunks, vec_model = load_pdf_index()
+    relevant_chunks = search_relevant_chunks(user_query, vec_model, index, chunks)
+    context = "\n\n".join(relevant_chunks)
+
+    prompt = (
+        f"ユーザーの質問: {user_query}\n\n"
+        f"関連情報:\n{context}\n\n"
+        f"画像キャプション:\n{caption}\n\n"
+        f"壁の補足情報:\n{wall_note}\n\n"
+        f"床の補足情報:\n{floor_note}\n\n"
+        "上記を基に、壁と床の状態を分析し、以下のMarkdown形式でレポート作成:\n"
+        "## 1. 壁の状態分析\n"
+        "### 1.1 現状\n(壁の現状)\n"
+        "### 1.2 劣化度 (A～Dで評価)\n"
+        "### 1.3 推定寿命\n"
+        "### 1.4 必要な対策\n"
+        "### 1.5 注意点\n"
+        "## 2. 床の状態分析\n"
+        "### 2.1 現状\n(床の現状)\n"
+        "### 2.2 劣化度 (A～Dで評価)\n"
+        "### 2.3 推定寿命\n"
+        "### 2.4 必要な対策\n"
+        "### 2.5 注意点\n"
+        "情報不足時は専門的な知識やインターネット検索も併用し、素人にも理解しやすく簡潔に回答してください。"
+    )
+
+    with st.spinner("レポートを生成中…"):
+        result = generate_report_with_gemini(prompt)
+        if result:
+            report_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            st.success("レポート生成完了！")
+
+            for section in report_text.split("## "):
+                if section.strip():
+                    header, content = section.split("\n", 1)
+                    with st.expander(header.strip(), expanded=True):
+                        st.markdown(content.strip())
+
+            st.download_button("📥 レポートをダウンロード", report_text, "report.md")
+        else:
+            st.error("レポート生成に失敗しました。")
