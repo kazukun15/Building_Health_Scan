@@ -1,6 +1,5 @@
-streamlit
-requests
-PyPDF2
-faiss-cpu
-sentence-transformers
-torch
+# requirements.txt —— Python 3.12 対応の軽量セット
+streamlit>=1.31,<2.0
+requests>=2.31.0
+PyPDF2>=3.0.1
+Pillow>=10.1.0
