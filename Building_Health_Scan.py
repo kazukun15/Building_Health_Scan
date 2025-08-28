@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 建物診断くん（スマホ対応・マテリアルデザイン風UI）
+# 建物診断くん（スマホ対応・マテリアルデザイン風UI・日本語フォント適用）
 # - 可視/赤外 画像：アップロード + カメラ
 # - EXIFからGPS抽出 → Folium地図に表示（手入力も可）
 # - 3PDFをRAG（軽量スコア）→ Gemini 2.0 Flash で詳細分析
 # - 結果のみ表示：総合評価カードを先頭に、詳細は展開
 # - レポートDL（共有）
+# - レポート表示に Noto Sans JP/Noto Serif JP を適用
 # Python 3.12 互換／重依存なし（軽量）
 # ===========================================================
 
@@ -32,7 +33,7 @@ import folium                         # pip install folium
 from streamlit_folium import st_folium  # pip install streamlit-folium
 
 # -----------------------------------------------------------
-# ユーティリティ
+# 定数
 # -----------------------------------------------------------
 APP_TITLE = "建物診断くん"
 PDF_SOURCES = [
@@ -41,6 +42,9 @@ PDF_SOURCES = [
     ("港区 公共施設マネジメント計画", "minatoku_Public_facility_management_plan.pdf"),
 ]
 
+# -----------------------------------------------------------
+# ユーティリティ
+# -----------------------------------------------------------
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = text.replace("\r", " ").replace("\n", " ")
@@ -122,7 +126,6 @@ def _to_deg(value) -> float:
         s = float(value[2].numerator) / float(value[2].denominator)
         return d + (m / 60.0) + (s / 3600.0)
     except Exception:
-        # すでにfloatかもしれない
         try:
             d, m, s = value
             return float(d) + float(m) / 60.0 + float(s) / 3600.0
@@ -225,10 +228,12 @@ def load_rag_corpus() -> List[Tuple[str, str]]:
     return corpus
 
 # -----------------------------------------------------------
-# UI: マテリアルデザイン風の簡易スタイル
+# UI: マテリアルデザイン風 + 日本語フォント適用CSS
 # -----------------------------------------------------------
 def inject_material_css():
     st.markdown("""
+    <!-- Google Fonts: Noto Sans JP / Noto Serif JP -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet">
     <style>
     :root{
       --mdc-primary:#2962ff;
@@ -242,6 +247,23 @@ def inject_material_css():
     }
     .block-container{padding-top:1rem;padding-bottom:2rem;}
     body{background:var(--mdc-bg);}
+    /* 日本語フォントクラス */
+    .jp-sans{
+      font-family:'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        'Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo', sans-serif !important;
+      line-height:1.7;
+      letter-spacing:0.01em;
+    }
+    .jp-serif{
+      font-family:'Noto Serif JP','Hiragino Mincho ProN','Yu Mincho',serif !important;
+      line-height:1.8;
+      letter-spacing:0.01em;
+    }
+    .jp-report h1,.jp-report h2,.jp-report h3,
+    .jp-report p,.jp-report li,.jp-report table{
+      font-family:'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        'Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo', sans-serif !important;
+    }
     .md-card{
       background:var(--mdc-surface);
       border-radius:var(--radius);
@@ -326,7 +348,6 @@ def main():
     # --- 位置情報（EXIF→GPS or 手入力） ---
     st.markdown("#### 3) 位置情報（自動 or 手入力）")
     lat, lon = None, None
-    # まず可視画像のEXIFからGPSを探す。なければIR画像、なければ手入力。
     if vis_src_bytes:
         gps = extract_gps_from_image(vis_src_bytes)
         if gps:
@@ -419,8 +440,8 @@ def main():
             st.warning("レポート出力が空でした。入力内容（質問・画像・PDF）をご確認ください。")
             return
 
-        # ---- レポートから「総合評価」ブロックを推定抽出してカード表示（簡易） ----
-        # 「## 総合評価」〜 次見出しの直前までをサマリとして切り出し
+        # ---- レポート（日本語フォント適用） ----
+        # 「## 総合評価」〜 次見出し直前までを抽出し、Noto Sans JPで表示
         summary_block = None
         try:
             pattern = r"(?:^|\n)##\s*総合評価[\s\S]*?(?=\n##\s|\Z)"
@@ -432,24 +453,29 @@ def main():
 
         st.markdown("#### 5) 解析結果")
         if summary_block:
-            with st.container():
-                st.markdown('<div class="md-card good-shadow">', unsafe_allow_html=True)
-                st.markdown('<div class="md-title">🧭 総合評価（要約）</div>', unsafe_allow_html=True)
-                st.markdown(summary_block)
-                st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
+            st.markdown('<div class="md-title">🧭 総合評価（要約）</div>', unsafe_allow_html=True)
+            st.markdown(f"<div class='jp-report'>{summary_block}</div>", unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
-        # 全文はExpanderに
+        # 全文（詳細）はExpander内を日本語フォントで
         with st.expander("詳細レポートを表示", expanded=(summary_block is None)):
-            st.markdown(report_md)
+            st.markdown(f"<div class='jp-report'>{report_md}</div>", unsafe_allow_html=True)
 
-        # ダウンロード（共有）
-        st.download_button("📄 レポートをダウンロード", report_md, file_name="building_health_report.md",
-                           mime="text/markdown", use_container_width=True)
+        # ダウンロード（共有）— Markdownはフォントを埋め込まない点に注意
+        st.download_button(
+            "📄 レポートをダウンロード",
+            report_md,
+            file_name="building_health_report.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
 
-        # 参考：使用したRAG抜粋
+        # 参考：使用したRAG抜粋（こちらも日本語フォントで）
         with st.expander("（参考）使用したRAG抜粋"):
             for src, ch in snippets:
-                st.markdown(f"**{src}**：{ch[:600]}{'...' if len(ch)>600 else ''}")
+                snippet = ch[:600] + ('...' if len(ch) > 600 else '')
+                st.markdown(f"<div class='jp-report'><b>{src}</b>：{snippet}</div>", unsafe_allow_html=True)
 
     # フッタ
     st.markdown("")
