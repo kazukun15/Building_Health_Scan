@@ -153,11 +153,11 @@ def extract_gps_from_image(uploaded_bytes: bytes) -> Optional[Tuple[float, float
     return (lat, lon)
 
 # -----------------------------------------------------------
-# Gemini 呼び出し
+# Gemini 呼び出し（★モデルのみ 2.0 Flash に変更★）
 # -----------------------------------------------------------
 def call_gemini(api_key: str, prompt_text: str, image_parts: List[Dict]) -> Dict:
-    # ★★★ 修正点: 正しいモデル名 'gemini-1.5-flash-latest' に変更 ★★★
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
+    # ここだけを gemini-2.0-flash に変更（他はそのまま）
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     parts = [{"text": prompt_text}]
     parts.extend(image_parts)
