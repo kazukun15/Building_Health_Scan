@@ -31,6 +31,7 @@ from PIL import Image
 # 地図
 import folium                              # pip install folium
 from streamlit_folium import st_folium     # pip install streamlit-folium
+from streamlit import components
 
 # --- オプション: streamlit-geolocation があれば使う ---
 HAVE_GEO = False
@@ -199,110 +200,49 @@ def load_rag_corpus() -> List[Tuple[str, str]]:
     return corpus
 
 # -----------------------------------------------------------
-# UI: マテリアルデザイン風 + 日本語フォント + ヒーロー/カード/タップ44px/フォーカス/ダーク対応
+# UI: マテリアルCSS/フォントは components.html で非表示挿入（先頭に出ない）
 # -----------------------------------------------------------
 def inject_material_css():
-    st.markdown("""
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet">
-    <style>
-    :root{
-      /* Material tokens */
-      --mdc-primary:#2962ff;
-      --mdc-primary-variant:#0039cb;
-      --mdc-secondary:#00b8d4;
-      --mdc-bg:#f7f9fc;
-      --mdc-surface:#ffffff;
-      --mdc-on-primary:#ffffff;
-      --mdc-outline:rgba(0,0,0,.08);
-      --radius:16px;
-      --shadow:0 6px 18px rgba(0,0,0,.08);
-      --tap-min:44px;
-    }
-    @media (prefers-color-scheme: dark){
-      :root{
-        --mdc-bg:#0f1115;
-        --mdc-surface:#171a21;
-        --mdc-on-primary:#ffffff;
-        --mdc-outline:rgba(255,255,255,.08);
-      }
-    }
-    .block-container{
-      padding-top:2.6rem !important;
-      padding-bottom:2rem;
-      overflow:visible !important;
-    }
-    body{background:var(--mdc-bg);} 
-
-    /* Typography */
-    .jp-sans{
-      font-family:'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI',
-        'Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo', sans-serif !important;
-      line-height:1.7; letter-spacing:.01em;
-    }
-    .jp-serif{
-      font-family:'Noto Serif JP','Hiragino Mincho ProN','Yu Mincho',serif !important;
-      line-height:1.8; letter-spacing:.01em;
-    }
-    .jp-report h1,.jp-report h2,.jp-report h3,.jp-report p,.jp-report li,.jp-report table{
-      font-family:'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI',
-        'Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo', sans-serif !important;
-      line-height:1.6;
-    }
-
-    /* Hero header */
-    .app-hero{
-      background:linear-gradient(135deg, var(--mdc-primary), var(--mdc-secondary));
-      color:#fff; border-radius:20px; box-shadow:var(--shadow);
-      padding:14px 16px; margin:0 0 14px 0; position:relative; overflow:visible;
-    }
-    .app-hero-title{
-      font-family:'Noto Sans JP', sans-serif; font-weight:900;
-      font-size:1.45rem; line-height:1.25; margin:0 0 4px 0;
-      text-shadow:0 1px 2px rgba(0,0,0,.18);
-      word-break:keep-all; overflow-wrap:anywhere;
-    }
-    .app-hero-sub{
-      font-family:'Noto Sans JP', sans-serif; font-weight:500;
-      font-size:.95rem; line-height:1.5; opacity:.95; margin:0;
-    }
-
-    /* Card */
-    .md-card{
-      background:var(--mdc-surface);
-      border-radius:var(--radius);
-      box-shadow:var(--shadow);
-      padding:1rem 1.1rem;
-      margin:0 0 1rem 0;
-      border:1px solid var(--mdc-outline);
-    }
-    .md-title{font-size:1.1rem;font-weight:700;margin:0 0 .6rem 0;}
-    .md-sub{opacity:.85;font-size:.95rem;}
-
-    .eval-chip{
-      display:inline-block;padding:.35rem .7rem;border-radius:999px;
-      color:#fff;font-weight:700;letter-spacing:.02em;
-      background:linear-gradient(135deg, var(--mdc-primary), var(--mdc-secondary));
-    }
-    .good-shadow{box-shadow:var(--shadow);} 
-
-    /* Buttons & inputs: min tap, radius, focus ring */
-    .stButton > button, .stTextInput input, .stFileUploader label, .stCameraInput label, .stNumberInput input {
-      min-height: var(--tap-min);
-      border-radius:12px !important;
-      font-weight:600;
-    }
-    .stButton > button{
-      background:linear-gradient(135deg, var(--mdc-primary), var(--mdc-secondary)) !important;
-      color:#fff !important;border:none !important;
-      box-shadow:var(--shadow);
-    }
-    :where(button, input, select, textarea):focus-visible {
-      outline:3px solid color-mix(in srgb, var(--mdc-primary) 60%, white);
-      outline-offset:2px; border-radius:12px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    components.v1.html(
+        """
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet">
+<style id="app-style">
+:root{
+  --mdc-primary:#2962ff;
+  --mdc-primary-variant:#0039cb;
+  --mdc-secondary:#00b8d4;
+  --mdc-bg:#f7f9fc;
+  --mdc-surface:#ffffff;
+  --mdc-on-primary:#ffffff;
+  --mdc-outline:rgba(0,0,0,.08);
+  --radius:16px; --shadow:0 6px 18px rgba(0,0,0,.08); --tap-min:44px;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --mdc-bg:#0f1115; --mdc-surface:#171a21; --mdc-on-primary:#ffffff; --mdc-outline:rgba(255,255,255,.08); }
+}
+</style>
+<style id="app-style-2">
+.block-container{padding-top:2.6rem !important;padding-bottom:2rem;overflow:visible !important;}
+body{background:var(--mdc-bg);}
+.jp-sans{font-family:'Noto Sans JP',-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.7;letter-spacing:.01em;}
+.jp-serif{font-family:'Noto Serif JP','Hiragino Mincho ProN','Yu Mincho',serif!important;line-height:1.8;letter-spacing:.01em;}
+.jp-report h1,.jp-report h2,.jp-report h3,.jp-report p,.jp-report li,.jp-report table{font-family:'Noto Sans JP',-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.6;}
+.app-hero{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary));color:#fff;border-radius:20px;box-shadow:var(--shadow);padding:14px 16px;margin:0 0 14px 0;position:relative;overflow:visible;}
+.app-hero-title{font-family:'Noto Sans JP',sans-serif;font-weight:900;font-size:1.45rem;line-height:1.25;margin:0 0 4px 0;text-shadow:0 1px 2px rgba(0,0,0,.18);word-break:keep-all;overflow-wrap:anywhere;}
+.app-hero-sub{font-family:'Noto Sans JP',sans-serif;font-weight:500;font-size:.95rem;line-height:1.5;opacity:.95;margin:0;}
+.md-card{background:var(--mdc-surface);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem 1.1rem;margin:0 0 1rem 0;border:1px solid var(--mdc-outline);}
+.md-title{font-size:1.1rem;font-weight:700;margin:0 0 .6rem 0;}
+.md-sub{opacity:.85;font-size:.95rem;}
+.eval-chip{display:inline-block;padding:.35rem .7rem;border-radius:999px;color:#fff;font-weight:700;letter-spacing:.02em;background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary));}
+.good-shadow{box-shadow:var(--shadow);}
+.stButton>button,.stTextInput input,.stFileUploader label,.stCameraInput label,.stNumberInput input{min-height:var(--tap-min);border-radius:12px!important;font-weight:600;}
+.stButton>button{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary))!important;color:#fff!important;border:none!important;box-shadow:var(--shadow);}
+:where(button,input,select,textarea):focus-visible{outline:3px solid color-mix(in srgb,var(--mdc-primary) 60%, white);outline-offset:2px;border-radius:12px;}
+</style>
+        """,
+        height=0,
+    )
 
 # -----------------------------------------------------------
 # 端末位置のフォールバック取得（query params経由）
@@ -323,29 +263,28 @@ def geolocate_fallback_via_query_params(show_widget: bool = True) -> Tuple[Optio
             return None, None
 
     if show_widget:
-        # ユーザーの許可後、トップウィンドウのURLを?lat=..&lon=..に書き換えて遷移
-        st.components.v1.html(
+        components.v1.html(
             """
-            <script>
-            (function(){
-              if (!navigator.geolocation){ document.body.innerText='GEO_UNSUPPORTED'; return; }
-              navigator.geolocation.getCurrentPosition(function(pos){
-                const lat = pos.coords.latitude.toFixed(6);
-                const lon = pos.coords.longitude.toFixed(6);
-                const url = new URL(window.location.href);
-                url.searchParams.set('lat', lat);
-                url.searchParams.set('lon', lon);
-                const a = document.createElement('a');
-                a.href = url.toString();
-                a.target = '_top';
-                a.rel = 'opener';
-                document.body.appendChild(a);
-                a.click();
-              }, function(err){
-                document.body.innerText = 'GEO_ERROR:' + (err && err.message ? err.message : 'DENIED');
-              }, { enableHighAccuracy:true, timeout:10000, maximumAge:0 });
-            })();
-            </script>
+<script>
+(function(){
+  if (!navigator.geolocation){ document.body.innerText='GEO_UNSUPPORTED'; return; }
+  navigator.geolocation.getCurrentPosition(function(pos){
+    const lat = pos.coords.latitude.toFixed(6);
+    const lon = pos.coords.longitude.toFixed(6);
+    const url = new URL(window.location.href);
+    url.searchParams.set('lat', lat);
+    url.searchParams.set('lon', lon);
+    const a = document.createElement('a');
+    a.href = url.toString();
+    a.target = '_top';
+    a.rel = 'opener';
+    document.body.appendChild(a);
+    a.click();
+  }, function(err){
+    document.body.innerText = 'GEO_ERROR:' + (err && err.message ? err.message : 'DENIED');
+  }, { enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+})();
+</script>
             """,
             height=0,
         )
@@ -361,10 +300,10 @@ def main():
     # ヒーローヘッダー
     st.markdown(
         f"""
-        <div class="app-hero jp-sans">
-          <div class="app-hero-title">🏗️ {APP_TITLE}</div>
-          <div class="app-hero-sub">スマートフォン最適化 / 画像（可視・赤外）＋RAG＋Gemini 2.5 Flash で詳細分析</div>
-        </div>
+<div class="app-hero jp-sans">
+  <div class="app-hero-title">🏗️ {APP_TITLE}</div>
+  <div class="app-hero-sub">スマートフォン最適化 / 画像（可視・赤外）＋RAG＋Gemini 2.5 Flash で詳細分析</div>
+</div>
         """,
         unsafe_allow_html=True
     )
@@ -438,9 +377,7 @@ def main():
     else:
         st.info("現在地取得：標準コンポーネントが未インストールのため簡易方式を使用します。下のボタン押下後、ブラウザ許可→自動で位置が入力されます。")
         if st.button("📍 現在地を取得（簡易方式）"):
-            # 実行するとクエリパラメータを付けてリロード
             geolocate_fallback_via_query_params(show_widget=True)
-        # 取得済みならクエリから読む
         lat_val, lon_val = geolocate_fallback_via_query_params(show_widget=False)
 
     c1, c2, c3 = st.columns([1,1,2])
