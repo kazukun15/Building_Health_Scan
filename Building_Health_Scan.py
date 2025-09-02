@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
 # 建物診断くん（スマホ対応・マテリアルデザイン風UI・日本語フォント適用）
-# - タイトルの視認性改善（ヒーローヘッダー＋上部余白/行間/overflow調整）
 # - 可視/赤外 画像：アップロード + カメラ
 # - EXIFからGPS抽出 → Folium地図に表示（手入力も可）
-# - 3PDFをRAG（軽量スコア）→ Gemini 2.0 Flash で詳細分析
+# - 3PDFをRAG（軽量スコア）→ Gemini 1.5 Flash で詳細分析
 # - 結果のみ表示：総合評価カードを先頭に、詳細は展開
 # - レポートDL（共有）
+# - レポート表示に Noto Sans JP/Noto Serif JP を適用
 # Python 3.12 互換／重依存なし（軽量）
 # ===========================================================
 
@@ -156,7 +156,8 @@ def extract_gps_from_image(uploaded_bytes: bytes) -> Optional[Tuple[float, float
 # Gemini 呼び出し
 # -----------------------------------------------------------
 def call_gemini(api_key: str, prompt_text: str, image_parts: List[Dict]) -> Dict:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-1.5:generateContent?key={api_key}"
+    # ★★★ 修正点: 正しいモデル名 'gemini-1.5-flash-latest' に変更 ★★★
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     parts = [{"text": prompt_text}]
     parts.extend(image_parts)
@@ -228,249 +229,62 @@ def load_rag_corpus() -> List[Tuple[str, str]]:
     return corpus
 
 # -----------------------------------------------------------
-# UI: マテリアルデザイン風 + 日本語フォント + タイトル改善CSS
+# UI: マテリアルデザイン風 + 日本語フォント適用CSS
 # -----------------------------------------------------------
 def inject_material_css():
     st.markdown("""
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet">
     <style>
-    /* =================================================================== */
-    /* 建物診断くん: Material Design 3 スタイルシート                  */
-    /* - モバイルファースト / ライト・ダーク対応 / Streamlit最適化      */
-    /* =================================================================== */
-
-    /* 1. フォント読み込み (Google Fonts) */
-    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap');
-    @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200');
-
-    /* 2. デザイントークン定義 (CSS変数) */
-    :root {
-      /* Color Palette (Light Theme) */
-      --md-sys-color-primary: #005AC1;
-      --md-sys-color-on-primary: #FFFFFF;
-      --md-sys-color-primary-container: #D8E2FF;
-      --md-sys-color-on-primary-container: #001A41;
-      --md-sys-color-secondary: #575E71;
-      --md-sys-color-on-secondary: #FFFFFF;
-      --md-sys-color-secondary-container: #DBE2F9;
-      --md-sys-color-on-secondary-container: #141B2C;
-      --md-sys-color-background: #F8F9FC;
-      --md-sys-color-on-background: #1A1C1E;
-      --md-sys-color-surface: #FCFCFF;
-      --md-sys-color-on-surface: #1A1C1E;
-      --md-sys-color-surface-variant: #E1E2EC;
-      --md-sys-color-on-surface-variant: #44474F;
-      --md-sys-color-outline: #74777F;
-      --md-sys-color-outline-variant: #C4C6D0;
-      --md-sys-color-error: #BA1A1A;
-      --md-sys-color-on-error: #FFFFFF;
-
-      /* Typography */
-      --md-sys-font-family: 'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', 'Meiryo', sans-serif;
-      --md-sys-line-height: 1.7;
-      --md-sys-letter-spacing: 0.01em;
-
-      /* Shape & Elevation */
-      --md-sys-shape-corner-medium: 12px;
-      --md-sys-shape-corner-large: 16px;
-      --md-sys-elevation-1: 0 1px 2px rgba(0,0,0,.08), 0 1px 3px rgba(0,0,0,.04);
-      --md-sys-elevation-2: 0 2px 6px rgba(0,0,0,.08), 0 2px 8px rgba(0,0,0,.04);
+    :root{
+      --mdc-primary:#2962ff;
+      --mdc-primary-variant:#0039cb;
+      --mdc-secondary:#00b8d4;
+      --mdc-bg:#f7f9fc;
+      --mdc-surface:#ffffff;
+      --mdc-on-primary:#ffffff;
+      --radius:16px;
+      --shadow:0 6px 18px rgba(0,0,0,.08);
     }
-
-    /* Dark Theme Variables */
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --md-sys-color-primary: #ADC6FF;
-        --md-sys-color-on-primary: #002E69;
-        --md-sys-color-primary-container: #004494;
-        --md-sys-color-on-primary-container: #D8E2FF;
-        --md-sys-color-secondary: #BFC6DC;
-        --md-sys-color-on-secondary: #293041;
-        --md-sys-color-secondary-container: #3F4759;
-        --md-sys-color-on-secondary-container: #DBE2F9;
-        --md-sys-color-background: #1A1C1E;
-        --md-sys-color-on-background: #E3E2E6;
-        --md-sys-color-surface: #222428;
-        --md-sys-color-on-surface: #E3E2E6;
-        --md-sys-color-surface-variant: #44474F;
-        --md-sys-color-on-surface-variant: #C4C6D0;
-        --md-sys-color-outline: #8E9099;
-        --md-sys-color-outline-variant: #44474F;
-        --md-sys-color-error: #FFB4AB;
-        --md-sys-color-on-error: #690005;
-      }
+    .block-container{padding-top:1rem;padding-bottom:2rem;}
+    body{background:var(--mdc-bg);}
+    /* 日本語フォントクラス */
+    .jp-sans{
+      font-family:'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        'Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo', sans-serif !important;
+      line-height:1.7;
+      letter-spacing:0.01em;
     }
-
-    /* 3. グローバル & Streamlit基本要素の調整 */
-    body {
-      background-color: var(--md-sys-color-background);
-      color: var(--md-sys-color-on-background);
-      font-family: var(--md-sys-font-family);
-      overflow-x: hidden;
+    .jp-serif{
+      font-family:'Noto Serif JP','Hiragino Mincho ProN','Yu Mincho',serif !important;
+      line-height:1.8;
+      letter-spacing:0.01em;
     }
-    .block-container {
-      padding: 1rem 1rem 3rem 1rem !important;
-      overflow: visible !important;
+    .jp-report h1,.jp-report h2,.jp-report h3,
+    .jp-report p,.jp-report li,.jp-report table{
+      font-family:'Noto Sans JP', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+        'Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo', sans-serif !important;
     }
-    header[data-testid="stHeader"], footer[data-testid="stFooter"] {
-      display: none !important;
+    .md-card{
+      background:var(--mdc-surface);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:1rem 1.1rem;
+      margin-bottom:1rem;
+      border:1px solid rgba(0,0,0,.04);
     }
-    h1, h2, h3, h4, h5, h6 {
-      font-family: var(--md-sys-font-family);
-      font-weight: 700;
-      color: var(--md-sys-color-on-surface);
+    .md-title{font-size:1.1rem;font-weight:700;margin:0.2rem 0 0.6rem 0;}
+    .md-sub{opacity:.85;font-size:.95rem;}
+    .eval-chip{
+      display:inline-block;padding:.35rem .7rem;border-radius:999px;
+      color:#fff;font-weight:700;letter-spacing:.02em;
+      background:linear-gradient(135deg, var(--mdc-primary), var(--mdc-secondary));
     }
-    h4 {
-      margin-top: 1.5rem;
-      padding-bottom: 0.3rem;
-      border-bottom: 1px solid var(--md-sys-color-outline-variant);
+    .primary-btn button{
+      background:linear-gradient(135deg, var(--mdc-primary), var(--mdc-secondary)) !important;
+      color:#fff !important;border:none !important;
+      box-shadow:var(--shadow);
     }
-    p, li {
-       font-family: var(--md-sys-font-family) !important;
-       line-height: var(--md-sys-line-height);
-       letter-spacing: var(--md-sys-letter-spacing);
-    }
-
-    /* 4. ヒーローヘッダー */
-    .app-hero {
-      background: var(--md-sys-color-primary-container);
-      color: var(--md-sys-color-on-primary-container);
-      border-radius: var(--md-sys-shape-corner-large);
-      padding: 1.5rem 1rem;
-      margin: -1rem -1rem 1.5rem -1rem;
-      display: flex;
-      gap: 12px;
-      align-items: flex-start;
-    }
-    .app-hero-icon {
-      font-family: 'Material Symbols Outlined';
-      font-size: 2.5rem;
-      font-variation-settings: 'FILL' 1;
-      margin-top: 2px;
-    }
-    .app-hero-text { flex: 1; }
-    .app-hero-title {
-      font-size: 1.6rem;
-      font-weight: 700;
-      line-height: 1.3;
-      margin: 0 0 4px 0;
-      word-break: keep-all;
-      overflow-wrap: anywhere;
-    }
-    .app-hero-sub {
-      font-size: 0.9rem;
-      font-weight: 400;
-      line-height: 1.5;
-      opacity: 0.9;
-      margin: 0;
-    }
-
-    /* 5. カードUI (.md-card) */
-    .md-card {
-      background-color: var(--md-sys-color-surface);
-      border: 1px solid var(--md-sys-color-outline-variant);
-      border-radius: var(--md-sys-shape-corner-large);
-      box-shadow: var(--md-sys-elevation-1);
-      padding: 1rem 1.25rem;
-      margin-bottom: 1rem;
-      transition: all 0.2s ease-in-out;
-    }
-    .good-shadow { box-shadow: var(--md-sys-elevation-2); }
-    .md-title {
-      font-size: 1.1rem;
-      font-weight: 700;
-      color: var(--md-sys-color-on-surface-variant);
-      margin: 0.2rem 0 0.8rem 0;
-    }
-    .md-sub {
-      color: var(--md-sys-color-on-surface-variant);
-      font-size: 0.9rem;
-    }
-
-    /* 6. StreamlitコンポーネントのMaterial化 */
-    div[data-testid="stTextInput"] > label, div[data-testid="stFileUploader"] > label {
-        display: none; /* Hide default labels, use markdown headers */
-    }
-    div[data-testid="stTextInput"] input, div[data-testid="stTextInput"] textarea {
-      background-color: var(--md-sys-color-surface-variant);
-      border: 1px solid var(--md-sys-color-outline-variant);
-      min-height: 48px;
-      padding: 12px;
-      border-radius: var(--md-sys-shape-corner-medium);
-      transition: all 0.2s ease;
-      color: var(--md-sys-color-on-surface-variant);
-    }
-    div[data-testid="stTextInput"] input:focus, div[data-testid="stTextInput"] textarea:focus {
-      border-color: var(--md-sys-color-primary);
-      box-shadow: 0 0 0 2px var(--md-sys-color-primary);
-    }
-    div[data-testid="stButton"] button, div[data-testid="stDownloadButton"] a {
-      min-height: 48px;
-      font-family: var(--md-sys-font-family);
-      font-weight: 700;
-      border: none !important;
-      border-radius: var(--md-sys-shape-corner-large) !important;
-      background: var(--md-sys-color-primary) !important;
-      color: var(--md-sys-color-on-primary) !important;
-      box-shadow: var(--md-sys-elevation-1);
-      transition: all 0.2s ease-in-out;
-      width: 100%;
-    }
-    div[data-testid="stButton"] button:hover, div[data-testid="stDownloadButton"] a:hover {
-      box-shadow: var(--md-sys-elevation-2);
-      filter: brightness(1.1);
-    }
-    div[data-testid="stButton"] button:focus-visible, div[data-testid="stDownloadButton"] a:focus-visible {
-      outline: 2px solid var(--md-sys-color-primary);
-      outline-offset: 2px;
-    }
-    div[data-testid="stButton"] button p::before {
-      font-family: 'Material Symbols Outlined';
-      content: 'science';
-      vertical-align: middle;
-      margin-right: 8px;
-      font-size: 1.2em;
-      font-variation-settings: 'WGHT' 500;
-    }
-
-    /* Expander (アコーディオン) */
-    div[data-testid="stExpander"] {
-      border: 1px solid var(--md-sys-color-outline-variant) !important;
-      border-radius: var(--md-sys-shape-corner-large) !important;
-      box-shadow: none !important;
-      background-color: var(--md-sys-color-surface);
-    }
-
-    /* 7. レポート出力 (.jp-report) */
-    .jp-report {
-      font-family: var(--md-sys-font-family) !important;
-      line-height: var(--md-sys-line-height);
-      color: var(--md-sys-color-on-surface);
-    }
-    .jp-report h1, .jp-report h2, .jp-report h3, .jp-report h4, .jp-report h5, .jp-report h6 {
-      font-family: var(--md-sys-font-family) !important;
-      font-weight: 700;
-      border: none;
-      padding-bottom: 0.2rem;
-      margin-top: 1.5rem;
-    }
-    .jp-report h2, .jp-report h3 {
-      margin-top: 1rem;
-      font-size: 1.15rem;
-      color: var(--md-sys-color-primary);
-    }
-    .jp-report .md-title {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 1.3rem;
-      color: var(--md-sys-color-primary);
-    }
-    .jp-report .md-title::before {
-      font-family: 'Material Symbols Outlined';
-      content: 'summarize';
-      font-size: 1.5em;
-      font-variation-settings: 'FILL' 1;
-    }
+    .good-shadow{box-shadow:var(--shadow);}
     </style>
     """, unsafe_allow_html=True)
 
@@ -481,124 +295,134 @@ def main():
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     inject_material_css()
 
-    # --- タイトル（ヒーローヘッダー） ---
-    st.markdown(
-        f"""
-        <div class="app-hero">
-            <span class="app-hero-icon material-symbols-outlined">construction</span>
-            <div class="app-hero-text">
-                <div class="app-hero-title">{APP_TITLE}</div>
-                <div class="app-hero-sub">スマホ最適化UI | 画像(可視/赤外)と参考資料(RAG)でAIが詳細分析</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    st.markdown(f"### 🏗️ {APP_TITLE}")
+    st.caption("スマートフォン最適化 / 画像（可視・赤外）＋RAG＋Gemini 1.5 Flash で詳細分析")
 
-    # --- 1) 質問 ---
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
+    # --- 入力行（スマホ向けに縦構成、カラムは自動で縦積みになる） ---
     st.markdown("#### 1) 質問")
-    user_q = st.text_input("質問", placeholder="分析したいテーマ・質問を入力", label_visibility="collapsed")
-    st.markdown('</div>', unsafe_allow_html=True)
+    user_q = st.text_input("例：外壁タイルのひび割れ基準と推定寿命", "", placeholder="分析したいテーマ・質問を入力")
 
-    # --- 2) 画像入力 ---
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
     st.markdown("#### 2) 画像入力（可視/赤外）")
     colA, colB = st.columns(2)
     with colA:
-        st.markdown("**可視画像**")
-        vis_file = st.file_uploader("可視画像を選択", type=["jpg", "jpeg", "png"], key="vis_up", label_visibility="collapsed")
-        vis_cam = st.camera_input("カメラで撮影", key="vis_cam", label_visibility="collapsed")
+        st.markdown("**可視画像（どちらか1つ）**")
+        vis_file = st.file_uploader("可視画像を選択（JPG/PNG）", type=["jpg", "jpeg", "png"], key="vis_up")
+        vis_cam = st.camera_input("カメラで撮影（可視）", key="vis_cam")
     with colB:
-        st.markdown("**赤外線（IR）画像（任意）**")
-        ir_file = st.file_uploader("IR画像を選択", type=["jpg", "jpeg", "png"], key="ir_up", label_visibility="collapsed")
+        st.markdown("**赤外線（IR）画像（任意：外付けカメラ写真）**")
+        ir_file = st.file_uploader("IR画像を選択（JPG/PNG）", type=["jpg", "jpeg", "png"], key="ir_up")
 
-    with st.expander("IRメタデータ（任意・精度向上）"):
-        ir_emiss = st.text_input("放射率 ε", "0.95")
-        ir_tref  = st.text_input("反射温度 T_ref [℃]", "20")
-        ir_tamb  = st.text_input("外気温 T_amb [℃]", "22")
-        ir_rh    = st.text_input("相対湿度 RH [%]", "65")
-        ir_dist  = st.text_input("撮影距離 [m]", "5")
-        ir_ang   = st.text_input("撮影角度 [°]", "10")
-    st.markdown('</div>', unsafe_allow_html=True)
-    
+        with st.expander("IRメタデータ（任意・精度向上）"):
+            ir_emiss = st.text_input("放射率 ε（例: 0.95）", "")
+            ir_tref  = st.text_input("反射温度 T_ref [℃]（例: 20）", "")
+            ir_tamb  = st.text_input("外気温 T_amb [℃]（例: 22）", "")
+            ir_rh    = st.text_input("相対湿度 RH [%]（例: 65）", "")
+            ir_dist  = st.text_input("撮影距離 [m]（例: 5）", "")
+            ir_ang   = st.text_input("撮影角度 [°]（例: 10）", "")
+
     # 画像ハンドリング
-    vis_img, vis_src_bytes = None, None
-    if vis_cam:
-        vis_img, vis_src_bytes = Image.open(vis_cam), vis_cam.getvalue()
-    elif vis_file:
-        vis_img, vis_src_bytes = Image.open(vis_file), vis_file.getvalue()
+    vis_img = None
+    vis_src_bytes = None
+    if vis_cam is not None:
+        vis_img = Image.open(vis_cam)
+        vis_src_bytes = vis_cam.getvalue()
+    elif vis_file is not None:
+        vis_img = Image.open(vis_file)
+        vis_src_bytes = vis_file.getvalue()
 
-    ir_img, ir_src_bytes = None, None
-    if ir_file:
-        ir_img, ir_src_bytes = Image.open(ir_file), ir_file.getvalue()
+    ir_img = None
+    ir_src_bytes = None
+    if ir_file is not None:
+        ir_img = Image.open(ir_file)
+        ir_src_bytes = ir_file.getvalue()
 
     # プレビュー
-    if vis_img or ir_img:
-        st.markdown('<div class="md-card">', unsafe_allow_html=True)
-        pv_col1, pv_col2 = st.columns(2)
-        with pv_col1:
-            if vis_img: st.image(vis_img, caption="可視画像", use_container_width=True)
-        with pv_col2:
-            if ir_img: st.image(ir_img, caption="IR画像", use_container_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-    # --- 3) 位置情報 ---
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
+    pv_col1, pv_col2 = st.columns(2)
+    with pv_col1:
+        if vis_img is not None:
+            st.image(vis_img, caption="可視画像", use_container_width=True)
+    with pv_col2:
+        if ir_img is not None:
+            st.image(ir_img, caption="IR画像", use_container_width=True)
+
+    # --- 位置情報（EXIF→GPS or 手入力） ---
     st.markdown("#### 3) 位置情報（自動 or 手入力）")
     lat, lon = None, None
     if vis_src_bytes:
         gps = extract_gps_from_image(vis_src_bytes)
-        if gps: lat, lon = gps
+        if gps:
+            lat, lon = gps
     if lat is None and ir_src_bytes:
         gps = extract_gps_from_image(ir_src_bytes)
-        if gps: lat, lon = gps
+        if gps:
+            lat, lon = gps
 
-    c1, c2 = st.columns(2)
-    with c1: lat = st.text_input("緯度", value=f"{lat:.6f}" if lat else "35.6804")
-    with c2: lon = st.text_input("経度", value=f"{lon:.6f}" if lon else "139.7690")
-    
-    try:
-        lat_f, lon_f = float(lat), float(lon)
-        m = folium.Map(location=[lat_f, lon_f], zoom_start=18, tiles="OpenStreetMap")
-        folium.Marker([lat_f, lon_f], tooltip="対象地点").add_to(m)
-        st_folium(m, height=300, use_container_width=True)
-    except (ValueError, TypeError):
-        st.info("有効な緯度・経度を入力してください。")
-    st.markdown('</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1,1,2])
+    with c1:
+        lat = st.text_input("緯度（例：35.6804）", value="" if lat is None else f"{lat:.6f}")
+    with c2:
+        lon = st.text_input("経度（例：139.7690）", value="" if lon is None else f"{lon:.6f}")
+    with c3:
+        st.caption("※ 画像EXIFに位置情報が含まれていれば自動表示。無い場合は手入力してください。")
 
-    # --- 4) 実行ボタン ---
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
+    # 地図表示
+    map_row = st.container()
+    with map_row:
+        try:
+            lat_f = float(lat) if lat else None
+            lon_f = float(lon) if lon else None
+        except Exception:
+            lat_f, lon_f = None, None
+
+        if lat_f is not None and lon_f is not None:
+            m = folium.Map(location=[lat_f, lon_f], zoom_start=18, tiles="OpenStreetMap")
+            folium.Marker([lat_f, lon_f], tooltip="対象地点").add_to(m)
+            st_folium(m, height=300, use_container_width=True)
+        else:
+            st.info("地図表示：緯度経度が未指定です。EXIFに位置が無い場合は手入力してください。")
+
+    # --- 実行ボタン ---
     st.markdown("#### 4) 解析の実行")
-    run = st.button("詳細分析を開始", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+    run = st.button("🔎 Geminiで詳細分析（結果のみ表示）", use_container_width=True)
 
-    # --- 解析フロー ---
+    # -------------------------------------------------------
+    # 解析フロー
+    # -------------------------------------------------------
     if run:
         if not user_q:
             st.error("質問を入力してください。")
             return
 
+        # RAGロード＆Top-K抽出
         corpus = load_rag_corpus()
         snippets = topk_chunks(user_q, corpus, k=4)
-        
-        image_parts = []
-        if vis_img: image_parts.append(image_to_inline_part(vis_img))
-        if ir_img: image_parts.append(image_to_inline_part(ir_img))
 
+        # 画像 → Gemini parts
+        image_parts = []
+        if vis_img is not None:
+            image_parts.append(image_to_inline_part(vis_img))
+        if ir_img is not None:
+            image_parts.append(image_to_inline_part(ir_img))
+
+        # IRメタ
         ir_meta = {
-            "has_ir": ir_img is not None, "emissivity": (ir_emiss or "不明").strip(),
-            "t_ref": (ir_tref or "不明").strip(), "t_amb": (ir_tamb or "不明").strip(),
-            "rh": (ir_rh or "不明").strip(), "dist": (ir_dist or "不明").strip(),
+            "has_ir": ir_img is not None,
+            "emissivity": (ir_emiss or "不明").strip(),
+            "t_ref": (ir_tref or "不明").strip(),
+            "t_amb": (ir_tamb or "不明").strip(),
+            "rh": (ir_rh or "不明").strip(),
+            "dist": (ir_dist or "不明").strip(),
             "angle": (ir_ang or "不明").strip(),
         }
-        
+
+        # プロンプト作成
         prompt = build_master_prompt(user_q, snippets, ir_meta)
 
+        # Gemini API Key
         try:
             api_key = st.secrets["gemini"]["API_KEY"]
         except (KeyError, FileNotFoundError):
-            st.error("Gemini API Keyが未設定です。.streamlit/secrets.tomlに設定してください。")
+            st.error("Gemini API Key が未設定です。.streamlit/secrets.toml に [gemini].API_KEY を設定してください。")
             return
 
         with st.spinner("Geminiが分析中…"):
@@ -606,42 +430,56 @@ def main():
                 result = call_gemini(api_key, prompt, image_parts)
                 report_md = extract_text_from_gemini(result)
             except requests.HTTPError as e:
-                st.error(f"APIエラー: {e.response.text[:500]}")
+                st.error(f"APIエラー: {e.response.status_code} {e.response.reason}\n{e.response.text[:500]}")
                 return
             except Exception as e:
                 st.error(f"呼び出しエラー: {e}")
                 return
 
         if not report_md:
-            st.warning("レポート出力が空でした。入力内容をご確認ください。")
+            st.warning("レポート出力が空でした。入力内容（質問・画像・PDF）をご確認ください。")
             return
-        
-        # --- 5) 解析結果 ---
-        st.markdown("---")
-        st.markdown("### 5) 解析結果")
-        
-        summary_block = re.search(r"(?:^|\n)##?\s*総合評価[\s\S]*?(?=\n##?\s|\Z)", report_md, re.IGNORECASE)
-        summary_text = summary_block.group(0) if summary_block else ""
 
-        if summary_text:
+        # ---- レポート（日本語フォント適用） ----
+        st.markdown("#### 5) 解析結果")
+        summary_block = None
+        try:
+            pattern = r"(?:^|\n)##?\s*総合評価[\s\S]*?(?=\n##?\s|\Z)"
+            m = re.search(pattern, report_md, re.IGNORECASE)
+            if m:
+                summary_block = m.group(0)
+        except Exception:
+            summary_block = None
+
+        if summary_block:
             st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
-            st.markdown('<div class="md-title">総合評価（要約）</div>', unsafe_allow_html=True)
-            st.markdown(summary_text, unsafe_allow_html=True)
+            st.markdown('<div class="md-title">🧭 総合評価（要約）</div>', unsafe_allow_html=True)
+            st.markdown(f"<div class='jp-report'>{summary_block}</div>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        with st.expander("詳細レポートを表示", expanded=(not summary_text)):
+        # 全文（詳細）はExpander内を日本語フォントで
+        with st.expander("詳細レポートを表示", expanded=(summary_block is None)):
             st.markdown(f"<div class='jp-report'>{report_md}</div>", unsafe_allow_html=True)
 
-        st.download_button("📄 レポートをダウンロード", report_md, "building_health_report.md", "text/markdown", use_container_width=True)
+        # ダウンロード（共有）
+        st.download_button(
+            "📄 レポートをダウンロード",
+            report_md,
+            file_name="building_health_report.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
 
+        # 参考：使用したRAG抜粋
         with st.expander("（参考）使用したRAG抜粋"):
             for src, ch in snippets:
                 snippet = ch[:600] + ('...' if len(ch) > 600 else '')
                 st.markdown(f"<div class='jp-report'><b>{src}</b>：{snippet}</div>", unsafe_allow_html=True)
 
-    # --- フッタ ---
+    # フッタ
     st.markdown("---")
     st.caption("© 建物診断くん — 可視/赤外 × RAG × Gemini。モバイル最適化UI。")
+
 
 if __name__ == "__main__":
     main()
