@@ -2,7 +2,7 @@
 # ===========================================================
 # 建物診断くん（スマホ対応・マテリアルデザイン風UI・日本語フォント適用）
 # - 可視/赤外 画像：アップロード + カメラ
-# - EXIFからGPS抽出 → Folium地図に表示（手入力も可）
+# - スマホの現在地（Geolocation API）→ Folium地図に表示（手入力も可）
 # - 3PDFをRAG（軽量スコア）→ Gemini 2.5 Flash で詳細分析
 # - 結果のみ表示：総合評価カードを先頭に、詳細は展開
 # - レポートDL（共有）
@@ -27,10 +27,10 @@ import requests
 import PyPDF2
 from PIL import Image
 
-# 位置情報・地図
-from exif import Image as ExifImage    # pip install exif
-import folium                           # pip install folium
-from streamlit_folium import st_folium  # pip install streamlit-folium
+# 位置情報・地図（デバイス位置の取得）
+from streamlit_geolocation import st_geolocation  # pip install streamlit-geolocation
+import folium                                      # pip install folium
+from streamlit_folium import st_folium             # pip install streamlit-folium
 
 # -----------------------------------------------------------
 # 定数
@@ -116,47 +116,9 @@ def image_to_inline_part(image: Image.Image, max_width: int = 1400) -> Dict:
     return {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
 
 # -----------------------------------------------------------
-# EXIF → GPS 抽出（緯度経度を10進度に）
-# -----------------------------------------------------------
-def _to_deg(value) -> float:
-    # EXIFの度分秒[(num,den)...]→ 10進度に変換
-    try:
-        d = float(value[0].numerator) / float(value[0].denominator)
-        m = float(value[1].numerator) / float(value[1].denominator)
-        s = float(value[2].numerator) / float(value[2].denominator)
-        return d + (m / 60.0) + (s / 3600.0)
-    except Exception:
-        try:
-            d, m, s = value
-            return float(d) + float(m) / 60.0 + float(s) / 3600.0
-        except Exception:
-            return None
-
-def extract_gps_from_image(uploaded_bytes: bytes) -> Optional[Tuple[float, float]]:
-    try:
-        exif = ExifImage(uploaded_bytes)
-    except Exception:
-        return None
-    if not exif.has_exif:
-        return None
-    if not (hasattr(exif, "gps_latitude") and hasattr(exif, "gps_longitude")
-            and hasattr(exif, "gps_latitude_ref") and hasattr(exif, "gps_longitude_ref")):
-        return None
-    lat = _to_deg(exif.gps_latitude)
-    lon = _to_deg(exif.gps_longitude)
-    if lat is None or lon is None:
-        return None
-    if exif.gps_latitude_ref in ["S", "s"]:
-        lat = -lat
-    if exif.gps_longitude_ref in ["W", "w"]:
-        lon = -lon
-    return (lat, lon)
-
-# -----------------------------------------------------------
-# Gemini 呼び出し（モデルを 2.5 Flash に更新）
+# Gemini 呼び出し（models/gemini-2.5-flash）
 # -----------------------------------------------------------
 def call_gemini(api_key: str, prompt_text: str, image_parts: List[Dict]) -> Dict:
-    # ★ ここが合格条件：models/gemini-2.5-flash を使用
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     parts = [{"text": prompt_text}]
@@ -262,7 +224,7 @@ def inject_material_css():
       padding-bottom:2rem;
       overflow:visible !important;
     }
-    body{background:var(--mdc-bg);}
+    body{background:var(--mdc-bg);} 
 
     /* Typography */
     .jp-sans{
@@ -314,7 +276,7 @@ def inject_material_css():
       color:#fff;font-weight:700;letter-spacing:.02em;
       background:linear-gradient(135deg, var(--mdc-primary), var(--mdc-secondary));
     }
-    .good-shadow{box-shadow:var(--shadow);}
+    .good-shadow{box-shadow:var(--shadow);} 
 
     /* Buttons & inputs: min tap, radius, focus ring */
     .stButton > button, .stTextInput input, .stFileUploader label, .stCameraInput label, .stNumberInput input {
@@ -381,19 +343,14 @@ def main():
 
     # 画像ハンドリング
     vis_img = None
-    vis_src_bytes = None
     if vis_cam is not None:
         vis_img = Image.open(vis_cam)
-        vis_src_bytes = vis_cam.getvalue()
     elif vis_file is not None:
         vis_img = Image.open(vis_file)
-        vis_src_bytes = vis_file.getvalue()
 
     ir_img = None
-    ir_src_bytes = None
     if ir_file is not None:
         ir_img = Image.open(ir_file)
-        ir_src_bytes = ir_file.getvalue()
 
     # プレビュー（カード）
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
@@ -406,31 +363,37 @@ def main():
             st.image(ir_img, caption="IR画像", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- 3) 位置情報 ---
+    # --- 3) 位置情報（スマホの現在地を使用） ---
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">3) 位置情報（自動 or 手入力）</div>', unsafe_allow_html=True)
-    lat, lon = None, None
-    if vis_src_bytes:
-        gps = extract_gps_from_image(vis_src_bytes)
-        if gps:
-            lat, lon = gps
-    if lat is None and ir_src_bytes:
-        gps = extract_gps_from_image(ir_src_bytes)
-        if gps:
-            lat, lon = gps
+    st.markdown('<div class="md-title">3) 位置情報（現在地 or 手入力）</div>', unsafe_allow_html=True)
+
+    loc = st_geolocation(key="geoloc", label="📍 現在地を取得（ブラウザの位置情報を許可してください）")
+    lat_val: Optional[float] = None
+    lon_val: Optional[float] = None
+    if isinstance(loc, dict):
+        lat_val = loc.get("latitude") or loc.get("lat")
+        lon_val = loc.get("longitude") or loc.get("lon")
+        try:
+            if lat_val is not None: lat_val = float(lat_val)
+            if lon_val is not None: lon_val = float(lon_val)
+        except Exception:
+            lat_val, lon_val = None, None
 
     c1, c2, c3 = st.columns([1,1,2])
     with c1:
-        lat = st.text_input("緯度（例：35.6804）", value="" if lat is None else f"{lat:.6f}")
+        lat_str = "" if lat_val is None else f"{lat_val:.6f}"
+        lat_str = st.text_input("緯度（例：35.6804）", value=lat_str, key="lat_manual")
     with c2:
-        lon = st.text_input("経度（例：139.7690）", value="" if lon is None else f"{lon:.6f}")
+        lon_str = "" if lon_val is None else f"{lon_val:.6f}"
+        lon_str = st.text_input("経度（例：139.7690）", value=lon_str, key="lon_manual")
     with c3:
-        st.caption("※ 画像EXIFに位置情報が含まれていれば自動表示。無い場合は手入力してください。")
+        st.caption("※ 端末の位置情報が取得できない場合は、緯度経度を手入力してください。")
 
     # 地図
+    lat_f, lon_f = None, None
     try:
-        lat_f = float(lat) if lat else None
-        lon_f = float(lon) if lon else None
+        lat_f = float(lat_str) if lat_str else None
+        lon_f = float(lon_str) if lon_str else None
     except Exception:
         lat_f, lon_f = None, None
 
@@ -439,7 +402,7 @@ def main():
         folium.Marker([lat_f, lon_f], tooltip="対象地点").add_to(m)
         st_folium(m, height=300, use_container_width=True)
     else:
-        st.info("地図表示：緯度経度が未指定です。EXIFに位置が無い場合は手入力してください。")
+        st.info("地図表示：緯度経度が未指定です。位置情報の許可を与えるか、手入力してください。")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # --- 4) 実行 ---
@@ -467,15 +430,15 @@ def main():
         if ir_img is not None:
             image_parts.append(image_to_inline_part(ir_img))
 
-        # IRメタ
+        # IRメタ（任意）
         ir_meta = {
             "has_ir": ir_img is not None,
-            "emissivity": (ir_emiss or "不明").strip(),
-            "t_ref": (ir_tref or "不明").strip(),
-            "t_amb": (ir_tamb or "不明").strip(),
-            "rh": (ir_rh or "不明").strip(),
-            "dist": (ir_dist or "不明").strip(),
-            "angle": (ir_ang or "不明").strip(),
+            "emissivity": (ir_emiss or "不明").strip() if 'ir_emiss' in locals() else "不明",
+            "t_ref": (ir_tref or "不明").strip() if 'ir_tref' in locals() else "不明",
+            "t_amb": (ir_tamb or "不明").strip() if 'ir_tamb' in locals() else "不明",
+            "rh": (ir_rh or "不明").strip() if 'ir_rh' in locals() else "不明",
+            "dist": (ir_dist or "不明").strip() if 'ir_dist' in locals() else "不明",
+            "angle": (ir_ang or "不明").strip() if 'ir_ang' in locals() else "不明",
         }
 
         # プロンプト作成
