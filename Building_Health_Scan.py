@@ -4,7 +4,7 @@
 # - 可視/赤外 画像：アップロード + カメラ
 # - 端末の現在地（HTML5 Geolocation）→ Folium地図に表示（手入力も可）
 #   * streamlit-geolocation があれば利用／無ければJSフォールバック
-# - 3PDFをRAG（軽量スコア）→ Gemini 2.5 Flash で詳細分析
+# - RAG：軽量BM25＋ブースト（IR/閾値/自治体）→ Gemini 2.5 Flash で詳細分析
 # - 結果のみ表示：総合評価カードを先頭に、詳細は展開
 # - レポートDL（共有）
 # - 日本語フォント（Noto Sans JP / Noto Serif JP）
@@ -19,9 +19,10 @@ if not hasattr(pkgutil, "ImpImporter"):
 import os
 import io
 import re
+import math
 import base64
 import unicodedata
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 
 import streamlit as st
 import requests
@@ -51,8 +52,26 @@ PDF_SOURCES = [
     ("港区 公共施設マネジメント計画", "minatoku_Public_facility_management_plan.pdf"),
 ]
 
+MAX_SNIPPETS = 6         # LLMへ渡す抜粋数
+MAX_SNIPPET_CHARS = 900  # 各抜粋の最大長
+
+# RAG用シノニム（簡易拡張）※必要に応じて追加
+QUERY_SYNONYMS = {
+    "ひび割れ": ["ひび割れ", "クラック", "亀裂", "ひび"],
+    "浮き": ["浮き", "うき"],
+    "剥離": ["剥離", "はく離", "はくり"],
+    "含水": ["含水", "含湿", "浸水", "漏水", "雨水侵入"],
+    "赤外線": ["赤外線", "IR", "サーモ", "熱画像", "サーモグラフィ"],
+    "基準": ["基準", "判定", "評価", "閾値"],
+    "タイル": ["タイル", "磁器質タイル", "モザイクタイル"],
+    "ALC": ["ALC", "軽量気泡コンクリート"],
+    "コンクリート": ["コンクリート", "RC", "中性化"],
+    "防水": ["防水", "塗膜", "シーリング", "シーラント"],
+    "劣化度": ["劣化度", "グレード", "区分", "A", "B", "C", "D"],
+}
+
 # -----------------------------------------------------------
-# ユーティリティ
+# 文字列ユーティリティ
 # -----------------------------------------------------------
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
@@ -60,60 +79,208 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
-def extract_text_from_pdf(pdf_path: str) -> str:
-    if not os.path.exists(pdf_path):
-        return ""
-    text = ""
-    try:
-        with open(pdf_path, "rb") as f:
-            reader = PyPDF2.PdfReader(f)
-            for p in reader.pages:
-                t = p.extract_text() or ""
-                text += t + "\n"
-    except Exception as e:
-        text += f"\n[PDF読込エラー:{pdf_path}:{e}]"
-    return normalize_text(text)
-
-def chunk_text(text: str, max_chars: int = 900, overlap: int = 120) -> List[str]:
-    chunks, i, N = [], 0, len(text)
-    while i < N:
-        end = min(i + max_chars, N)
-        ch = text[i:end].strip()
-        if ch:
-            chunks.append(ch)
-        i = end - overlap if end - overlap > i else end
-    return chunks
-
 def tokenize(s: str) -> List[str]:
+    # 形態素解析なしの軽量トークナイズ（数字・記号を扱いつつ日本語対応）
     s = s.lower()
-    s = re.sub(r"[^a-z0-9一-龥ぁ-んァ-ン_]+", " ", s)
+    s = re.sub(r"[^\w一-龥ぁ-んァ-ン％℃．\.]", " ", s)
+    s = s.replace("．", ".")
     s = re.sub(r"\s+", " ", s).strip()
     return s.split()
 
-def simple_retrieval_score(query: str, chunk: str) -> float:
-    q_tokens = set(tokenize(query))
-    c_tokens = tokenize(chunk)
-    if not q_tokens or not c_tokens:
-        return 0.0
-    score = 0.0
-    for qt in q_tokens:
-        score += c_tokens.count(qt) * 1.0
-        if qt in c_tokens:
-            score += 0.5
-    # 冗長ペナルティ（長すぎる塊を弱める）
-    score = score / (1.0 + len(chunk) / 2000.0)
-    return score
+def query_expand_tokens(q: str) -> List[str]:
+    tokens = set(tokenize(q))
+    for key, syns in QUERY_SYNONYMS.items():
+        if key in q or any(s in q for s in syns):
+            for s in syns:
+                for t in tokenize(s):
+                    tokens.add(t)
+    return list(tokens)
 
-def topk_chunks(query: str, corpus: List[Tuple[str, str]], k: int = 4) -> List[Tuple[str, str]]:
-    scored = [(simple_retrieval_score(query, ch), src, ch) for (src, ch) in corpus]
+# -----------------------------------------------------------
+# PDF → チャンク（ページ番号付き）
+# -----------------------------------------------------------
+def extract_chunks_from_pdf(pdf_path: str, title: str,
+                            max_chars: int = 900, overlap: int = 120) -> List[Dict[str, Any]]:
+    """各PDFをページ単位で読み、その上で文字長チャンク化。ページ範囲を保持。"""
+    if not os.path.exists(pdf_path):
+        return []
+    chunks: List[Dict[str, Any]] = []
+    try:
+        with open(pdf_path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            buf = ""
+            page_start = 1
+            for i, page in enumerate(reader.pages, start=1):
+                t = page.extract_text() or ""
+                # ページ区切りは軽く保持
+                page_text = normalize_text(t)
+                if not page_text:
+                    continue
+                # ページテキストをmax_charsで分割
+                pos = 0
+                while pos < len(page_text):
+                    end = min(pos + max_chars, len(page_text))
+                    ch = page_text[pos:end].strip()
+                    if ch:
+                        chunks.append({
+                            "doc": title,
+                            "path": pdf_path,
+                            "text": ch,
+                            "page_start": i,
+                            "page_end": i,  # 1ページ内で切っているので等しい
+                        })
+                    # オーバーラップ
+                    pos = end - overlap if (end - overlap) > pos else end
+    except Exception as e:
+        chunks.append({
+            "doc": title, "path": pdf_path,
+            "text": f"[PDF読込エラー:{pdf_path}:{e}]",
+            "page_start": None, "page_end": None
+        })
+    return chunks
+
+# -----------------------------------------------------------
+# RAGインデックス：BM25（軽量）＋メタブースト
+# -----------------------------------------------------------
+class BM25Index:
+    def __init__(self, k1: float = 1.6, b: float = 0.75):
+        self.k1 = k1
+        self.b = b
+        self.N = 0
+        self.avgdl = 0.0
+        self.df: Dict[str, int] = {}
+        self.doc_len: List[int] = []
+        self.postings: Dict[str, List[Tuple[int, int]]] = {}  # term -> [(doc_id, tf), ...]
+        self.docs: List[Dict[str, Any]] = []  # メタ含む
+
+    @staticmethod
+    def _tf(tokens: List[str]) -> Dict[str, int]:
+        tf: Dict[str, int] = {}
+        for t in tokens:
+            tf[t] = tf.get(t, 0) + 1
+        return tf
+
+    def build(self, docs: List[Dict[str, Any]]):
+        """docs: {"text", "doc", "page_start", "page_end", ...}"""
+        self.docs = docs
+        self.N = len(docs)
+        lengths = []
+        # 事前に全DF/ポスティング作成
+        for doc_id, d in enumerate(docs):
+            tokens = tokenize(d["text"])
+            d["_tokens"] = tokens
+            tf = self._tf(tokens)
+            lengths.append(len(tokens))
+            for term, c in tf.items():
+                # df
+                self.df[term] = self.df.get(term, 0) + 1
+                # postings
+                self.postings.setdefault(term, []).append((doc_id, c))
+        self.doc_len = lengths
+        self.avgdl = (sum(lengths) / self.N) if self.N else 0.0
+
+    def idf(self, term: str) -> float:
+        df = self.df.get(term, 0)
+        # Okapi BM25のIDF（+1安定項）
+        return math.log((self.N - df + 0.5) / (df + 0.5) + 1.0)
+
+    def score_doc(self, q_tokens: List[str], doc_id: int) -> float:
+        score = 0.0
+        dl = self.doc_len[doc_id] if doc_id < len(self.doc_len) else 0
+        if dl == 0:
+            return 0.0
+        # クエリ内重複は無視（集合でOK）
+        for term in set(q_tokens):
+            plist = self.postings.get(term)
+            if not plist:
+                continue
+            # doc_idのtfを探す
+            tf = 0
+            # postingsは通常docごとに1件
+            # （低メモリのため線形探索だが、コーパス小規模を想定）
+            for did, c in plist:
+                if did == doc_id:
+                    tf = c
+                    break
+            if tf == 0:
+                continue
+            idf = self.idf(term)
+            denom = tf + self.k1 * (1 - self.b + self.b * (dl / (self.avgdl or 1.0)))
+            score += idf * (tf * (self.k1 + 1)) / (denom or 1.0)
+        return score
+
+# -----------------------------------------------------------
+# RAG構築（キャッシュ）
+# -----------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def build_rag() -> Dict[str, Any]:
+    # 1) PDF → メタ付きチャンク
+    all_chunks: List[Dict[str, Any]] = []
+    for title, path in PDF_SOURCES:
+        all_chunks.extend(extract_chunks_from_pdf(path, title))
+    # 2) BM25インデックス
+    bm25 = BM25Index()
+    if all_chunks:
+        bm25.build(all_chunks)
+    # 3) 追加メタ：数値閾値・IR関連語の有無
+    for d in all_chunks:
+        txt = d["text"]
+        d["_has_numbers"] = bool(re.search(r"\b\d+(\.\d+)?\s*(mm|㎜|％|%|℃)\b", txt))
+        d["_has_ir"] = any(k in txt for k in ["赤外線", "サーモ", "IR", "熱画像", "放射率", "反射温度"])
+    return {"index": bm25, "docs": all_chunks}
+
+# -----------------------------------------------------------
+# RAG検索（BM25 + ブースト）
+# -----------------------------------------------------------
+def rag_search(query: str, have_ir: bool, k: int = MAX_SNIPPETS) -> List[Dict[str, Any]]:
+    data = build_rag()
+    bm25: BM25Index = data["index"]
+    docs = data["docs"]
+    if not docs:
+        return []
+
+    q_tokens = query_expand_tokens(query)
+
+    # ブーストフラグ
+    want_threshold = any(w in query for w in ["基準", "閾値", "幅", "mm", "％", "%", "℃", "温度"])
+    boost_muni = None
+    if "港区" in query:
+        boost_muni = "港区"
+    elif "上島町" in query or "上嶋町" in query:
+        boost_muni = "上島町"
+
+    scored: List[Tuple[float, int]] = []
+    for doc_id, d in enumerate(docs):
+        base = bm25.score_doc(q_tokens, doc_id)
+
+        # 閾値系を求めている → 数値入り抜粋を微ブースト
+        if want_threshold and d.get("_has_numbers"):
+            base *= 1.12
+
+        # IR画像がある → IR関連の節を微ブースト
+        if have_ir and d.get("_has_ir"):
+            base *= 1.10
+
+        # 自治体ブースト（質問に自治体が含まれるとき）
+        if boost_muni:
+            if boost_muni in d["doc"]:
+                base *= 1.15
+
+        if base > 0:
+            scored.append((base, doc_id))
+
     scored.sort(key=lambda x: x[0], reverse=True)
-    out = [(src, ch) for (s, src, ch) in scored[:k] if s > 0]
-    if not out and corpus:
-        out = [corpus[0]]  # 保険
-    return out
+    top = [docs[doc_id] for (_, doc_id) in scored[: k]]
+    # 長すぎる抜粋はカット
+    for t in top:
+        if len(t["text"]) > MAX_SNIPPET_CHARS:
+            t["text"] = t["text"][:MAX_SNIPPET_CHARS] + "…"
+    return top
 
+# -----------------------------------------------------------
+# 画像 → Geminiインライン
+# -----------------------------------------------------------
 def image_to_inline_part(image: Image.Image, max_width: int = 1400) -> Dict:
-    # GeminiにBase64で送る（JPEG固定）
     if image.mode != "RGB":
         image = image.convert("RGB")
     if image.width > max_width:
@@ -144,13 +311,22 @@ def extract_text_from_gemini(result: Dict) -> str:
         return ""
 
 # -----------------------------------------------------------
-# マスタープロンプト（“結果のみ”・総合評価先頭）
+# プロンプト（“結果のみ”＋根拠ページを必須表示）
 # -----------------------------------------------------------
 def build_master_prompt(user_q: str,
-                        rag_snippets: List[Tuple[str, str]],
+                        rag_snippets: List[Dict[str, Any]],
                         ir_meta: Dict) -> str:
-    rag_block = [f"[{src}] {txt}" for (src, txt) in rag_snippets]
-    rag_text = "\n".join(rag_block)
+    # RAG抜粋（出典＋ページ）
+    rag_lines = []
+    for d in rag_snippets:
+        pg = ""
+        if d.get("page_start") is not None:
+            if d["page_end"] and d["page_end"] != d["page_start"]:
+                pg = f" p.{d['page_start']}-{d['page_end']}"
+            else:
+                pg = f" p.{d['page_start']}"
+        rag_lines.append(f"[{d['doc']}{pg}] {d['text']}")
+    rag_text = "\n".join(rag_lines)
 
     ir_note = ""
     if ir_meta.get("has_ir"):
@@ -163,8 +339,9 @@ def build_master_prompt(user_q: str,
         )
 
     prompt = f"""
-あなたは非破壊検査・建築・材料学の上級診断士。国土交通省（MLIT）基準に整合し、与えられた根拠のみで簡潔かつ正確に日本語レポートを作成せよ。
-ハルシネーションは禁止。数値閾値や定義はRAG抜粋にある場合のみ使用。無い場合は「未掲載」と明示する。
+あなたは非破壊検査・建築・材料学の上級診断士。国土交通省（MLIT）および自治体原典PDFの根拠のみを用いて、日本語で簡潔に“結果のみ”を作成せよ。
+ハルシネーションは禁止。数値閾値や定義はRAG抜粋にある場合のみ使用。無い場合は「未掲載」と明示。
+各主張に **[出典: 文書名 §/見出し p.xx]** を併記すること（本文中でOK）。
 
 # 入力
 - ユーザー質問: {user_q}
@@ -172,32 +349,18 @@ def build_master_prompt(user_q: str,
 {rag_text}
 
 {ir_note}
-# 出力仕様（“結果のみ”のMarkdown）
+# 出力仕様（Markdown、“結果のみ”）
 1. **総合評価**
    - グレード（A/B/C/D）と主因（1–2行）
    - 推定残存寿命（幅、例：7–12年）／（任意）補修後の期待寿命
-2. **主要根拠（可視/IR/NDT）** # 画像から読み取れる事実に限定
-3. **MLIT基準との関係** # RAG内の文書名＋節/見出しで簡潔に
+2. **主要根拠（可視/IR/NDT）** # 画像から読み取れる事実に限定、根拠出典を併記
+3. **MLIT/自治体基準との関係** # 文書名＋節/見出し＋ページ
 4. **推奨対応（優先度順）**
-5. **限界と追加データ要望** # 精度向上に必要な追補情報
+5. **限界と追加データ要望**
 
 注意: 画像から直接測れない値（ひび幅等）は断定しない。IRメタ不足時は信頼度を下げる旨を明記。
 """.strip()
     return normalize_text(prompt)
-
-# -----------------------------------------------------------
-# RAG（3PDFを統合して軽量Top-K抽出）
-# -----------------------------------------------------------
-@st.cache_resource(show_spinner=False)
-def load_rag_corpus() -> List[Tuple[str, str]]:
-    corpus: List[Tuple[str, str]] = []
-    for name, path in PDF_SOURCES:
-        text = extract_text_from_pdf(path)
-        chunks = chunk_text(text, max_chars=900, overlap=120)
-        for ch in chunks:
-            if len(ch) >= 40:
-                corpus.append((name, ch))
-    return corpus
 
 # -----------------------------------------------------------
 # UI: マテリアルCSS/フォントは components.html で非表示挿入（先頭に出ない）
@@ -209,14 +372,10 @@ def inject_material_css():
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Serif+JP:wght@500;700&display=swap" rel="stylesheet">
 <style id="app-style">
 :root{
-  --mdc-primary:#2962ff;
-  --mdc-primary-variant:#0039cb;
-  --mdc-secondary:#00b8d4;
-  --mdc-bg:#f7f9fc;
-  --mdc-surface:#ffffff;
-  --mdc-on-primary:#ffffff;
-  --mdc-outline:rgba(0,0,0,.08);
-  --radius:16px; --shadow:0 6px 18px rgba(0,0,0,.08); --tap-min:44px;
+  --mdc-primary:#2962ff; --mdc-primary-variant:#0039cb; --mdc-secondary:#00b8d4;
+  --mdc-bg:#f7f9fc; --mdc-surface:#ffffff; --mdc-on-primary:#ffffff;
+  --mdc-outline:rgba(0,0,0,.08); --radius:16px; --shadow:0 6px 18px rgba(0,0,0,.08);
+  --tap-min:44px;
 }
 @media (prefers-color-scheme: dark){
   :root{ --mdc-bg:#0f1115; --mdc-surface:#171a21; --mdc-on-primary:#ffffff; --mdc-outline:rgba(255,255,255,.08); }
@@ -248,11 +407,6 @@ body{background:var(--mdc-bg);}
 # 端末位置のフォールバック取得（query params経由）
 # -----------------------------------------------------------
 def geolocate_fallback_via_query_params(show_widget: bool = True) -> Tuple[Optional[float], Optional[float]]:
-    """
-    streamlit-geolocation が使えない場合の簡易位置取得。
-    JSで端末位置を取得し、トップページのクエリパラメータ（lat/lon）を書き換えてリロード。
-    取得後はその値を返す。
-    """
     params = st.experimental_get_query_params()
     lat = params.get("lat", [None])[0]
     lon = params.get("lon", [None])[0]
@@ -302,7 +456,7 @@ def main():
         f"""
 <div class="app-hero jp-sans">
   <div class="app-hero-title">🏗️ {APP_TITLE}</div>
-  <div class="app-hero-sub">スマートフォン最適化 / 画像（可視・赤外）＋RAG＋Gemini 2.5 Flash で詳細分析</div>
+  <div class="app-hero-sub">スマートフォン最適化 / 画像（可視・赤外）＋RAG（BM25/ブースト）＋Gemini 2.5 Flash</div>
 </div>
         """,
         unsafe_allow_html=True
@@ -420,9 +574,9 @@ def main():
             st.error("質問を入力してください。")
             return
 
-        # RAGロード＆Top-K抽出
-        corpus = load_rag_corpus()
-        snippets = topk_chunks(user_q, corpus, k=4)
+        # RAG検索（BM25 + ブースト）
+        have_ir = ir_img is not None
+        snippets = rag_search(user_q, have_ir=have_ir, k=MAX_SNIPPETS)
 
         # 画像 → Gemini parts
         image_parts = []
@@ -433,7 +587,7 @@ def main():
 
         # IRメタ（任意）
         ir_meta = {
-            "has_ir": ir_img is not None,
+            "has_ir": have_ir,
             "emissivity": (locals().get('ir_emiss') or "不明").strip(),
             "t_ref": (locals().get('ir_tref') or "不明").strip(),
             "t_amb": (locals().get('ir_tamb') or "不明").strip(),
@@ -503,7 +657,7 @@ def main():
 
     # フッタ
     st.markdown("")
-    st.caption("© 建物診断くん — 可視/赤外 × RAG × Gemini。モバイル最適化UI。")
+    st.caption("© 建物診断くん — 可視/赤外 × RAG（BM25/ブースト）× Gemini 2.5 Flash。モバイル最適化UI。")
 
 
 if __name__ == "__main__":
