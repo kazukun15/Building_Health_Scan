@@ -5,3 +5,4 @@ Pillow
 folium
 streamlit-folium
 streamlit-geolocation
+streamlit-back-camera-input
