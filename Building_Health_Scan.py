@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 建物診断くん（スマホ対応・マテリアルUI・複数画像・強化版）
-# 追加強化点：
-#  - TXTダウンロードは UTF-8 BOM 付きで文字化け回避
-#  - プロンプトに「各主要所見へ出典必須」制約を追加（RAG反映の最低保証）
-#  - RAG不足時の “公的サイト優先 Web検索” を任意で併用（Bing or SerpAPI）
-#  - 画像ギャラリーに削除ボタン（×）追加
-#  - 解析中はプログレスバー＆ステータス表示で可視化
-#  - 背面カメラ（可能なら）＋複数アップロード（可視/IR 合計上限 8）
-#  - 位置情報は端末の現在地（geolocation or JS フォールバック）＋ Folium 地図
-#  - RAG：PDF 3本（Structure_Base / 上島町 / 港区）をBM25で統合、IR/数値有りをブースト
-#  - Gemini 2.5 Flash でサンプル級テンプレの“結果のみ”報告書を生成
+# 建物診断くん（スマホ対応・マテリアルUI・複数画像・高速化対応）
+# 変更点（本版）
+#  - 解析ボタンの名称を「解析する」に統一
+#  - 高速モード（初回推奨）を追加：RAG上位K縮小、画像送信数の自動削減、画像圧縮幅縮小、Web検索を既定オフ
+#  - Web検索結果をキャッシュ（TTL=10分）
+#  - 画像所見の抽出を軽量化（低解像度統計に切替）
+#  - ギャラリーから代表画像のみをGeminiへ送信（高速モード：可視2＋IR1）
+#  - TXTダウンロードをBOM付きにして文字化け回避
+#  - 各主要所見で出典併記を“必須”にする制約をプロンプトへ追加
 # ===========================================================
 
 # Python 3.12: pkgutil.ImpImporter 削除対策（古い依存向け）
@@ -237,14 +235,11 @@ def rag_search(query: str, have_ir: bool, k: int = MAX_SNIPPETS) -> List[Dict[st
     return top
 
 # ---------------------- Web検索（任意・公的サイト優先） ----------------------
-def web_search_snippets(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
-    """
-    Bing Web Search API または SerpAPI（どちらか secrets にある方）で上位を取得。
-    .go.jp や pdf を優先的に採用。失敗時は空配列。
-    secrets 例：
-      [bing] API_KEY="..."
-      [serpapi] API_KEY="..."
-    """
+@st.cache_data(ttl=600, show_spinner=False)
+def web_search_snippets_cached(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
+    return _web_search_snippets_impl(query, max_items)
+
+def _web_search_snippets_impl(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
     try:
         if "bing" in st.secrets and st.secrets["bing"].get("API_KEY"):
@@ -252,7 +247,7 @@ def web_search_snippets(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
             url = "https://api.bing.microsoft.com/v7.0/search"
             headers = {"Ocp-Apim-Subscription-Key": api}
             params = {"q": query, "count": max_items * 3, "mkt": "ja-JP", "textDecorations": False}
-            r = requests.get(url, headers=headers, params=params, timeout=20)
+            r = requests.get(url, headers=headers, params=params, timeout=15)
             r.raise_for_status()
             data = r.json()
             web_pages = (data.get("webPages") or {}).get("value") or []
@@ -272,7 +267,7 @@ def web_search_snippets(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
             api = st.secrets["serpapi"]["API_KEY"]
             url = "https://serpapi.com/search.json"
             params = {"engine": "google", "q": query, "hl": "ja", "num": max_items * 3, "api_key": api}
-            r = requests.get(url, params=params, timeout=20)
+            r = requests.get(url, params=params, timeout=15)
             r.raise_for_status()
             data = r.json()
             for item in data.get("organic_results", []):
@@ -290,7 +285,6 @@ def web_search_snippets(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
         else:
             return []
 
-        # スコア順に整列して上位を返す
         results.sort(key=lambda x: x["score"], reverse=True)
         trimmed: List[Dict[str, Any]] = []
         for r in results:
@@ -308,10 +302,10 @@ def web_search_snippets(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
         return []
 
 # ---------------------- 画像の軽量スクリーニング ----------------------
-def pil_stats(image: Image.Image) -> Dict[str, float]:
+def pil_stats(image: Image.Image, target_w: int = 256) -> Dict[str, float]:
     if image.mode != "RGB":
         image = image.convert("RGB")
-    w = 256 if image.width > 256 else image.width
+    w = target_w if image.width > target_w else image.width
     ratio = w / image.width if image.width else 1.0
     image = image.resize((w, max(1, int(image.height * ratio))))
     gray = image.convert("L")
@@ -332,8 +326,8 @@ def pil_stats(image: Image.Image) -> Dict[str, float]:
         "sat_mean": round(sat_mean, 2),
     }
 
-def analyze_visual(image: Image.Image) -> Dict[str, Any]:
-    s = pil_stats(image)
+def analyze_visual(image: Image.Image, target_w: int = 256) -> Dict[str, Any]:
+    s = pil_stats(image, target_w=target_w)
     crack_hint = s["edge_ratio"] > 0.11
     stain_hint = s["sat_mean"] < 70 and s["mean_l"] < 110
     level = "low"
@@ -351,9 +345,9 @@ def analyze_visual(image: Image.Image) -> Dict[str, Any]:
         "note": "画像ベースの簡易傾向。寸法・幅などは画像だけでは確定できません。"
     }
 
-def analyze_ir(image: Image.Image, meta: Dict[str, str]) -> Dict[str, Any]:
+def analyze_ir(image: Image.Image, meta: Dict[str, str], target_w: int = 256) -> Dict[str, Any]:
     gray = image.convert("L")
-    w = 256 if gray.width > 256 else gray.width
+    w = target_w if gray.width > target_w else gray.width
     gray = gray.resize((w, max(1, int(gray.height * (w / (gray.width or 1))))))
     vals = list(gray.getdata())
     if not vals:
@@ -420,7 +414,8 @@ def rule_based_life(grade: str) -> str:
 
 # ---------------------- ドメイン知識（一般原則） ----------------------
 def domain_priors_text() -> str:
-    return normalize_text("""
+    return normalize_text(
+        """
 - 写真のみから寸法（ひび幅等）や材料特性を正確に決定することはできない。数値が必要な場合は根拠文献の閾値を引用する。
 - 可視：クラック/目地劣化は雨水浸入・仕上げ剥離・躯体劣化につながる可能性がある。
 - 赤外線：放射率・反射温度・外気温・湿度・撮影距離/角度・風/日射等の条件に強く影響される。JPEGの疑似温度は絶対値として扱わない。
@@ -428,7 +423,8 @@ def domain_priors_text() -> str:
 - 維持管理：軽微段階での目地/防水補修・再塗装等がライフサイクルコストを低減する。
 - 判定は「画像所見」「RAG根拠」「現地条件」の整合で行い、不足があれば“未確定”と表現する。
 - 追加調査メニュー：散水試験、打診、付着力、鉄筋腐食指標、中性化試験、含水率等。必要に応じ採否を検討する。
-    """)
+        """
+    )
 
 # ---------------------- Gemini API ----------------------
 def image_to_inline_part(image: Image.Image, max_width: int = 1400) -> Dict:
@@ -541,16 +537,16 @@ def inject_material_css():
   :root{ --mdc-bg:#0f1115; --mdc-surface:#171a21; --mdc-outline:rgba(255,255,255,.08); }
 }
 .block-container{padding-top:2.2rem !important;padding-bottom:2rem;}
-body{background:var(--mdc-bg);}
+body{background:var(--mdc-bg);} 
 .jp-sans{font-family:'Noto Sans JP',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.7;}
 .jp-report *{font-family:'Noto Sans JP',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.6;}
 .app-hero{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary));color:#fff;border-radius:20px;box-shadow:var(--shadow);padding:14px 16px;margin:0 0 14px 0;}
-.app-hero-title{font-weight:900;font-size:1.45rem;line-height:1.25;margin:0 0 4px 0;text-shadow:0 1px 2px rgba(0,0,0,.18);}
+.app-hero-title{font-weight:900;font-size:1.45rem;line-height:1.25;margin:0 0 4px 0;text-shadow:0 1px 2px rgba(0,0,0,.18);} 
 .app-hero-sub{font-weight:500;font-size:.95rem;opacity:.95;margin:0;}
-.md-card{background:var(--mdc-surface);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem 1.1rem;margin:0 0 1rem 0;border:1px solid var(--mdc-outline);}
+.md-card{background:var(--mdc-surface);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem 1.1rem;margin:0 0 1rem 0;border:1px solid var(--mdc-outline);} 
 .md-title{font-size:1.1rem;font-weight:700;margin:0 0 .6rem 0;}
 .stButton>button,.stTextInput input,.stFileUploader label,.stCameraInput label{min-height:var(--tap-min);border-radius:12px!important;font-weight:600;}
-.stButton>button{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary))!important;color:#fff!important;border:none!important;box-shadow:var(--shadow);}
+.stButton>button{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary))!important;color:#fff!important;border:none!important;box-shadow:var(--shadow);} 
 :where(button,input,select,textarea):focus-visible{outline:3px solid color-mix(in srgb,var(--mdc-primary) 60%, white);outline-offset:2px;border-radius:12px;}
 </style>
         """,
@@ -580,7 +576,7 @@ def geolocate_fallback_via_query_params(show_widget: bool = True) -> Tuple[Optio
     url.searchParams.set('lat', lat);
     url.searchParams.set('lon', lon);
     const a=document.createElement('a'); a.href=url.toString(); a.target='_top'; document.body.appendChild(a); a.click();
-  }, function(){}, {enableHighAccuracy:true, timeout:10000, maximumAge:0});
+  }, function(){}, {enableHighAccuracy:true, timeout:8000, maximumAge:0});
 })();
 </script>
             """,
@@ -635,6 +631,9 @@ def main():
         unsafe_allow_html=True
     )
 
+    # 高速モードトグル
+    fast_mode = st.toggle("⚡ 高速モード（初回推奨：代表画像・低解像度・RAG縮小・Web検索OFF）", value=True)
+
     # 1) 質問
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
     st.markdown('<div class="md-title">1) 質問</div>', unsafe_allow_html=True)
@@ -644,8 +643,8 @@ def main():
     # 2) Web検索併用（任意）
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
     st.markdown('<div class="md-title">2) RAG不足時の Web検索 併用（任意・公的サイト優先）</div>', unsafe_allow_html=True)
-    use_web = st.toggle("RAGで不足する場合は Web検索も併用（.go.jp / PDF を優先・出典URL併記）", value=False)
-    st.caption("Bing または SerpAPI の APIキーが secrets に設定されている場合のみ有効。")
+    use_web = st.toggle("RAGで不足する場合は Web検索も併用（.go.jp / PDF を優先・出典URL併記）", value=False, disabled=fast_mode)
+    st.caption("Bing または SerpAPI の APIキーが secrets に設定されている場合のみ有効。高速モードでは既定でOFFです。")
     st.markdown('</div>', unsafe_allow_html=True)
 
     # 3) 画像（複数・背面カメラ優先）
@@ -738,7 +737,7 @@ def main():
     st.markdown('<div class="md-title">4) 位置情報（現在地 or 手入力）</div>', unsafe_allow_html=True)
     lat_val: Optional[float] = None
     lon_val: Optional[float] = None
-    if HAVE_GEO:
+    if HAVE_GEO and not fast_mode:
         loc = st_geolocation(key="geoloc", label="📍 現在地を取得（ブラウザで許可）")
         if isinstance(loc, dict):
             lat_val = loc.get("latitude") or loc.get("lat")
@@ -749,7 +748,6 @@ def main():
             except Exception:
                 lat_val, lon_val = None, None
     else:
-        st.info("コンポーネント未インストールのため簡易方式です。下のボタン押下→許可で自動入力。")
         if st.button("📍 現在地を取得（簡易方式）"):
             geolocate_fallback_via_query_params(show_widget=True)
         lat_val, lon_val = geolocate_fallback_via_query_params(show_widget=False)
@@ -780,12 +778,12 @@ def main():
     # 5) 実行
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
     st.markdown('<div class="md-title">5) 解析の実行</div>', unsafe_allow_html=True)
-    run = st.button("🔎 サンプル級レベルで詳細分析（RAG + Web任意 + 複数画像 + ドメイン知識）", use_container_width=True)
+    run = st.button("🔎 解析する", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     if run:
         # 進捗UI
-        progress = st.progress(0, text="前提チェック中…")
+        progress = st.progress(0, text="入力確認中…")
         step = 0
 
         # 入力検証
@@ -795,23 +793,28 @@ def main():
         if not (st.session_state["vis_gallery"] or st.session_state["ir_gallery"]):
             st.warning("少なくとも1枚の画像（可視またはIR）を追加してください。")
             return
-        step += 10; progress.progress(step, text="RAG準備中…")
+        step += 15; progress.progress(step, text="RAG準備中…")
 
-        # RAG
-        snippets = rag_search(user_q, have_ir=bool(st.session_state["ir_gallery"]), k=MAX_SNIPPETS)
-        step += 20; progress.progress(step, text="画像所見の集約中…")
+        # RAG（高速モードでは上位Kを縮小）
+        k_snip = 4 if fast_mode else MAX_SNIPPETS
+        snippets = rag_search(user_q, have_ir=bool(st.session_state["ir_gallery"]), k=k_snip)
+        step += 15; progress.progress(step, text="画像所見の集約中…")
 
-        # 画像所見
-        vis_list = [analyze_visual(img) for img in st.session_state["vis_gallery"]]
-        ir_meta = {
+        # 画像所見（高速モードでは低解像度統計）
+        vis_target_w = 128 if fast_mode else 256
+        ir_target_w = 128 if fast_mode else 256
+        vis_pairs = [(img, analyze_visual(img, target_w=vis_target_w)) for img in st.session_state["vis_gallery"]]
+        ir_pairs  = [(img, analyze_ir(img, {
             "emissivity": (st.session_state.get('ir_emiss') or "不明").strip(),
             "t_ref": (st.session_state.get('ir_tref') or "不明").strip(),
             "t_amb": (st.session_state.get('ir_tamb') or "不明").strip(),
             "rh": (st.session_state.get('ir_rh') or "不明").strip(),
             "dist": (st.session_state.get('ir_dist') or "不明").strip(),
             "angle": (st.session_state.get('ir_ang') or "不明").strip(),
-        }
-        ir_list = [analyze_ir(img, ir_meta) for img in st.session_state["ir_gallery"]]
+        }, target_w=ir_target_w)) for img in st.session_state["ir_gallery"]]
+
+        vis_list = [v for (_, v) in vis_pairs]
+        ir_list  = [i for (_, i) in ir_pairs]
         step += 15; progress.progress(step, text="暫定評価を計算中…")
 
         # 暫定評価
@@ -821,16 +824,29 @@ def main():
 
         # Web検索（任意）
         web_snips: List[Dict[str, Any]] = []
-        if use_web:
-            web_snips = web_search_snippets(user_q, max_items=3)
+        if use_web and not fast_mode:
+            web_snips = web_search_snippets_cached(user_q, max_items=3)
         step += 10; progress.progress(step, text="プロンプトを作成中…")
 
-        # 画像 → Gemini parts
-        image_parts = []
-        for img in st.session_state["vis_gallery"]:
-            image_parts.append(image_to_inline_part(img))
-        for img in st.session_state["ir_gallery"]:
-            image_parts.append(image_to_inline_part(img))
+        # 画像送信の選抜（高速モード：可視上位2 + IR上位1）
+        image_parts: List[Dict[str, Any]] = []
+        if fast_mode:
+            # 可視：edge_ratioで上位2
+            if vis_pairs:
+                vis_sorted = sorted(vis_pairs, key=lambda p: p[1]['metrics']['edge_ratio'], reverse=True)
+                for img, _ in vis_sorted[:2]:
+                    image_parts.append(image_to_inline_part(img, max_width=1000))
+            # IR：delta_relで上位1
+            if ir_pairs:
+                ir_sorted = sorted(ir_pairs, key=lambda p: p[1]['delta_rel'], reverse=True)
+                for img, _ in ir_sorted[:1]:
+                    image_parts.append(image_to_inline_part(img, max_width=1000))
+        else:
+            # 全画像（幅1400に正規化）
+            for img, _ in vis_pairs:
+                image_parts.append(image_to_inline_part(img, max_width=1400))
+            for img, _ in ir_pairs:
+                image_parts.append(image_to_inline_part(img, max_width=1400))
 
         ir_meta_note = (
             "注: 赤外線画像はJPEG相対評価。放射率/反射温度/外気温/湿度/距離/角度/風/日射等に影響され、"
@@ -847,7 +863,7 @@ def main():
             rule_grade=rule_grade,
             rule_life=rule_life,
             ir_meta_note=ir_meta_note,
-            web_snippets=web_snips if use_web else None
+            web_snippets=web_snips if (use_web and not fast_mode) else None
         )
 
         step += 10; progress.progress(step, text="Gemini API に送信中…")
@@ -940,7 +956,7 @@ def main():
                     snippet = d["text"][:600] + ('…' if len(d["text"]) > 600 else '')
                     pg = f" p.{d['page_start']}" if d.get("page_start") else ""
                     st.markdown(f"<div class='jp-report'><b>{d['doc']}{pg}</b>：{snippet}</div>", unsafe_allow_html=True)
-            if use_web and web_snips:
+            if (use_web and not fast_mode) and web_snips:
                 st.markdown("**Web（参考）**")
                 for d in web_snips:
                     snippet = d["text"][:600] + ('…' if len(d["text"]) > 600 else '')
