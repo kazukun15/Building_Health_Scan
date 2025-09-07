@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 建物診断くん（スマホ対応・マテリアルUI・複数画像対応）
-# RAG（BM25+ブースト）＋ ドメイン知識（一般原則）＋ 画像スクリーニング所見 → Gemini 2.5 Flash
-# - 可視/赤外：アップロード複数 or カメラ（背面優先、繰り返し撮影で追加）
-# - 端末の現在地（Geolocation）＋ Folium 地図
-# - “結果のみ”：総合評価を最初に、詳細は Expander
-# - Word貼り付け用テキスト（ダウンロード＆コピーボックス）
-# - CSSは components.html で非表示挿入（生CSSが画面に出ない）
-# Python 3.12 互換・軽量依存
+# 建物診断くん（スマホ対応・マテリアルUI・複数画像・強化版）
+# 追加強化点：
+#  - TXTダウンロードは UTF-8 BOM 付きで文字化け回避
+#  - プロンプトに「各主要所見へ出典必須」制約を追加（RAG反映の最低保証）
+#  - RAG不足時の “公的サイト優先 Web検索” を任意で併用（Bing or SerpAPI）
+#  - 画像ギャラリーに削除ボタン（×）追加
+#  - 解析中はプログレスバー＆ステータス表示で可視化
+#  - 背面カメラ（可能なら）＋複数アップロード（可視/IR 合計上限 8）
+#  - 位置情報は端末の現在地（geolocation or JS フォールバック）＋ Folium 地図
+#  - RAG：PDF 3本（Structure_Base / 上島町 / 港区）をBM25で統合、IR/数値有りをブースト
+#  - Gemini 2.5 Flash でサンプル級テンプレの“結果のみ”報告書を生成
 # ===========================================================
 
-# Python 3.12: pkgutil.ImpImporter削除回避（古い依存対策）
+# Python 3.12: pkgutil.ImpImporter 削除対策（古い依存向け）
 import pkgutil
 if not hasattr(pkgutil, "ImpImporter"):
     pkgutil.ImpImporter = pkgutil.zipimporter
@@ -30,20 +33,19 @@ import requests
 import PyPDF2
 from PIL import Image, ImageFilter
 
-# 地図
 import folium
 from streamlit_folium import st_folium
-from streamlit import components
+import streamlit.components.v1 as components
 
 # geolocation（任意）
 HAVE_GEO = False
 try:
-    from streamlit_geolocation import st_geolocation
+    from streamlit_geolocation import st_geolocation  # pip install streamlit-geolocation
     HAVE_GEO = True
 except Exception:
     HAVE_GEO = False
 
-# ★ 背面カメラ用コンポーネント（無ければ自動フォールバック）
+# 背面カメラ（任意）
 HAVE_BACK_CAM = False
 try:
     from streamlit_back_camera_input import back_camera_input  # pip install streamlit-back-camera-input
@@ -61,7 +63,7 @@ PDF_SOURCES = [
 
 MAX_SNIPPETS = 8
 MAX_SNIPPET_CHARS = 1000
-MAX_IMAGES_TOTAL = 8   # 可視+IRの合計上限（負荷対策）
+MAX_IMAGES_TOTAL = 8  # 可視+IR 合計
 
 QUERY_SYNONYMS = {
     "ひび割れ": ["ひび割れ", "クラック", "亀裂", "ひび"],
@@ -197,7 +199,6 @@ def build_rag() -> Dict[str, Any]:
     all_chunks: List[Dict[str, Any]] = []
     for title, path in PDF_SOURCES:
         all_chunks.extend(extract_chunks_from_pdf(path, title))
-    # 追加メタ
     for d in all_chunks:
         txt = d["text"]
         d["_has_numbers"] = bool(re.search(r"\b\d+(\.\d+)?\s*(mm|㎜|％|%|℃)\b", txt))
@@ -234,6 +235,77 @@ def rag_search(query: str, have_ir: bool, k: int = MAX_SNIPPETS) -> List[Dict[st
         if len(t["text"]) > MAX_SNIPPET_CHARS:
             t["text"] = t["text"][:MAX_SNIPPET_CHARS] + "…"
     return top
+
+# ---------------------- Web検索（任意・公的サイト優先） ----------------------
+def web_search_snippets(query: str, max_items: int = 3) -> List[Dict[str, Any]]:
+    """
+    Bing Web Search API または SerpAPI（どちらか secrets にある方）で上位を取得。
+    .go.jp や pdf を優先的に採用。失敗時は空配列。
+    secrets 例：
+      [bing] API_KEY="..."
+      [serpapi] API_KEY="..."
+    """
+    results: List[Dict[str, Any]] = []
+    try:
+        if "bing" in st.secrets and st.secrets["bing"].get("API_KEY"):
+            api = st.secrets["bing"]["API_KEY"]
+            url = "https://api.bing.microsoft.com/v7.0/search"
+            headers = {"Ocp-Apim-Subscription-Key": api}
+            params = {"q": query, "count": max_items * 3, "mkt": "ja-JP", "textDecorations": False}
+            r = requests.get(url, headers=headers, params=params, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            web_pages = (data.get("webPages") or {}).get("value") or []
+            for item in web_pages:
+                title = item.get("name", "")
+                snippet = item.get("snippet", "")
+                link = item.get("url", "")
+                if not title or not link:
+                    continue
+                score = 0
+                if ".go.jp" in link:
+                    score += 3
+                if link.lower().endswith(".pdf"):
+                    score += 2
+                results.append({"title": title, "snippet": snippet, "url": link, "score": score})
+        elif "serpapi" in st.secrets and st.secrets["serpapi"].get("API_KEY"):
+            api = st.secrets["serpapi"]["API_KEY"]
+            url = "https://serpapi.com/search.json"
+            params = {"engine": "google", "q": query, "hl": "ja", "num": max_items * 3, "api_key": api}
+            r = requests.get(url, params=params, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            for item in data.get("organic_results", []):
+                title = item.get("title", "")
+                snippet = item.get("snippet", "")
+                link = item.get("link", "")
+                if not title or not link:
+                    continue
+                score = 0
+                if ".go.jp" in link:
+                    score += 3
+                if link.lower().endswith(".pdf"):
+                    score += 2
+                results.append({"title": title, "snippet": snippet, "url": link, "score": score})
+        else:
+            return []
+
+        # スコア順に整列して上位を返す
+        results.sort(key=lambda x: x["score"], reverse=True)
+        trimmed: List[Dict[str, Any]] = []
+        for r in results:
+            trimmed.append({
+                "doc": f"WEB: {r['title']} ({r['url']})",
+                "path": r["url"],
+                "text": normalize_text(r["snippet"])[:MAX_SNIPPET_CHARS],
+                "page_start": None, "page_end": None,
+                "_web": True
+            })
+            if len(trimmed) >= max_items:
+                break
+        return trimmed
+    except Exception:
+        return []
 
 # ---------------------- 画像の軽量スクリーニング ----------------------
 def pil_stats(image: Image.Image) -> Dict[str, float]:
@@ -307,7 +379,6 @@ def analyze_ir(image: Image.Image, meta: Dict[str, str]) -> Dict[str, Any]:
 def rule_based_grade(vis_list: List[Dict[str, Any]], ir_list: List[Dict[str, Any]]) -> Tuple[str, str]:
     score = 0.0
     reasons = []
-    # 可視：最大のedge_ratioを採用
     if vis_list:
         er_max = max(v["metrics"]["edge_ratio"] for v in vis_list)
         if er_max > 0.22:
@@ -318,7 +389,6 @@ def rule_based_grade(vis_list: List[Dict[str, Any]], ir_list: List[Dict[str, Any
             score += 1; reasons.append(f"やや高いエッジ密度（edge_ratio_max={er_max:.3f}）")
         if any(v.get("stain_hint") for v in vis_list):
             score += 1; reasons.append("低彩度・暗部多めで汚染傾向（可視複数枚の所見）")
-    # IR：最大のdelta_relを採用
     if ir_list:
         dr_max = max(i["delta_rel"] for i in ir_list)
         if dr_max > 0.5:
@@ -357,6 +427,7 @@ def domain_priors_text() -> str:
 - 安全確保：剥離・落下リスクがある場合は近接調査（打診/はつり/付着力等）と早期仮設防護を検討する。
 - 維持管理：軽微段階での目地/防水補修・再塗装等がライフサイクルコストを低減する。
 - 判定は「画像所見」「RAG根拠」「現地条件」の整合で行い、不足があれば“未確定”と表現する。
+- 追加調査メニュー：散水試験、打診、付着力、鉄筋腐食指標、中性化試験、含水率等。必要に応じ採否を検討する。
     """)
 
 # ---------------------- Gemini API ----------------------
@@ -372,7 +443,7 @@ def image_to_inline_part(image: Image.Image, max_width: int = 1400) -> Dict:
     return {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
 
 def call_gemini(api_key: str, prompt_text: str, image_parts: List[Dict]) -> Dict:
-    # ★ モデル：Gemini 2.5 Flash（指定通り）
+    # モデル：Gemini 2.5 Flash
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     parts = [{"text": prompt_text}]
@@ -388,7 +459,7 @@ def extract_text_from_gemini(result: Dict) -> str:
     except Exception:
         return ""
 
-# ---------------------- プロンプト組立（サンプル級“雨漏り診断報告書”化） ----------------------
+# ---------------------- プロンプト（出典必須・強制） ----------------------
 def build_master_prompt_for_rain_leak(user_q: str,
                                       rag_snippets: List[Dict[str, Any]],
                                       priors: str,
@@ -396,15 +467,17 @@ def build_master_prompt_for_rain_leak(user_q: str,
                                       ir_list: List[Dict[str, Any]],
                                       rule_grade: str,
                                       rule_life: str,
-                                      ir_meta_note: str) -> str:
-    # RAG（出典＋ページ付）
+                                      ir_meta_note: str,
+                                      web_snippets: Optional[List[Dict[str, Any]]] = None) -> str:
     rag_lines = []
     for d in rag_snippets:
         pg = f" p.{d['page_start']}" if d.get("page_start") else ""
         rag_lines.append(f"[{d['doc']}{pg}] {d['text']}")
+    if web_snippets:
+        for d in web_snippets:
+            rag_lines.append(f"[{d['doc']}] {d['text']}")
     rag_text = "\n".join(rag_lines) if rag_lines else "（該当抜粋なし）"
 
-    # 画像所見（複数集約）
     def pack_vis(v):
         m = v['metrics']
         return f"- edge_ratio={m['edge_ratio']} meanL={m['mean_l']} sat={m['sat_mean']} crack_hint={v['crack_hint']} stain_hint={v['stain_hint']} level={v['screening_level']}"
@@ -416,10 +489,9 @@ def build_master_prompt_for_rain_leak(user_q: str,
 
     today = date.today().strftime("%Y年%m月%d日")
 
-    # サンプル級の詳細見出しを強く指定
     prompt = f"""
 あなたは非破壊検査・建築・材料学の上級診断士。国土交通省（MLIT）関連文書の適合性を重視し、与えたRAG抜粋の範囲内で簡潔かつ正確に**雨漏り診断報告書**を作成する。
-**禁止**：推測での数値化（閾値・ひび幅等）／未出典の記述。根拠が無い場合は「未掲載／未確定」と明示する。
+**禁止**：推測での数値化（閾値・ひび幅等）／未出典の断定。根拠が無い場合は「未掲載／未確定」と明示する。
 
 # 入力
 - 作成日: {today}
@@ -428,7 +500,7 @@ def build_master_prompt_for_rain_leak(user_q: str,
 - RAG抜粋（出典ページ付き、これ以外は根拠にしない）:
 {rag_text}
 
-- ドメイン一般原則（方針・注意点。閾値は含まない）:
+- ドメイン一般原則（閾値は含まない）:
 {priors}
 
 - 可視画像所見（複数）:
@@ -445,16 +517,17 @@ def build_master_prompt_for_rain_leak(user_q: str,
 # 出力仕様（Markdown、“結果のみ”でセクション順序・見出しを厳守。Word貼付け前提で箇条書き多用）
 # 見出し： # 雨漏り診断報告書 / 1. 概要 / 2. 結論（原因の有力候補・優先度順） / 3. 写真・IR画像の読み取り要点 / 4. 原因特定に向けた検証手順（推奨） / 5. 応急処置（一次止水） / 6. 恒久対策（再発防止） / 7. 期待効果と注意点 / 8. 概算費用感（参考） / 9. 散水試験 記録シート（行項目のみ） / 10. 施工依頼メモ（ひな形）
 - 先頭に **総合評価（A/B/C/D、主因1–2行）** を明示
-- 「推定残存寿命」は**幅**で記載。根拠がRAGに無ければ「参考（画像・一般原則ベース）」と注記
-- 各主要所見には可能な範囲で **[出典: 文書名]** を併記（RAGに存在する場合）
+- 「推定残存寿命」は**幅**で記載。RAG根拠が無ければ「参考（画像・一般原則ベース）」と注記
 - IRは相対指標であることを明示し、日射/雨直後など条件の留意点を記す
 - 文量は提示サンプルと同等の密度を目標
+
+- **重要：各主要所見（原因候補・基準適合・推奨対策）には、可能な限り行末に必ず `［出典: 文書名/ページ or URL］` を最低1件併記すること。根拠がRAGに無い場合は「未掲載」と明記する。**
 """.strip()
     return normalize_text(prompt)
 
-# ---------------------- CSS（表示されない注入） ----------------------
+# ---------------------- CSS（非表示注入） ----------------------
 def inject_material_css():
-    components.v1.html(
+    components.html(
         """
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
@@ -479,13 +552,12 @@ body{background:var(--mdc-bg);}
 .stButton>button,.stTextInput input,.stFileUploader label,.stCameraInput label{min-height:var(--tap-min);border-radius:12px!important;font-weight:600;}
 .stButton>button{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary))!important;color:#fff!important;border:none!important;box-shadow:var(--shadow);}
 :where(button,input,select,textarea):focus-visible{outline:3px solid color-mix(in srgb,var(--mdc-primary) 60%, white);outline-offset:2px;border-radius:12px;}
-.st-emotion-cache-ue6h4q{display:none!important;} /* Streamlitメニュー非表示(必要に応じて) */
 </style>
         """,
         height=0,
     )
 
-# ---------------------- 位置（フォールバックJS） ----------------------
+# ---------------------- 位置（JSフォールバック） ----------------------
 def geolocate_fallback_via_query_params(show_widget: bool = True) -> Tuple[Optional[float], Optional[float]]:
     params = st.experimental_get_query_params()
     lat = params.get("lat", [None])[0]
@@ -496,7 +568,7 @@ def geolocate_fallback_via_query_params(show_widget: bool = True) -> Tuple[Optio
         except Exception:
             return None, None
     if show_widget:
-        components.v1.html(
+        components.html(
             """
 <script>
 (function(){
@@ -516,7 +588,7 @@ def geolocate_fallback_via_query_params(show_widget: bool = True) -> Tuple[Optio
         )
     return None, None
 
-# ---------------------- セッション初期化（複数画像ギャラリー） ----------------------
+# ---------------------- セッション（ギャラリー） ----------------------
 def ensure_galleries():
     if "vis_gallery" not in st.session_state:
         st.session_state["vis_gallery"] = []
@@ -526,22 +598,26 @@ def ensure_galleries():
 def add_to_gallery(pil_img: Image.Image, key: str):
     if pil_img is None:
         return
-    # 容量対策：横1400pxに正規化
     if pil_img.mode != "RGB":
         pil_img = pil_img.convert("RGB")
     if pil_img.width > 1400:
         r = 1400 / float(pil_img.width)
         pil_img = pil_img.resize((1400, int(pil_img.height * r)))
     st.session_state[key].append(pil_img)
-    # 上限超はトリム
     total = len(st.session_state["vis_gallery"]) + len(st.session_state["ir_gallery"])
     while total > MAX_IMAGES_TOTAL:
-        # 古い方から削除
         if st.session_state["ir_gallery"]:
             st.session_state["ir_gallery"].pop(0)
         elif st.session_state["vis_gallery"]:
             st.session_state["vis_gallery"].pop(0)
         total = len(st.session_state["vis_gallery"]) + len(st.session_state["ir_gallery"])
+
+def remove_from_gallery(key: str, idx: int):
+    try:
+        if key in st.session_state and 0 <= idx < len(st.session_state[key]):
+            st.session_state[key].pop(idx)
+    except Exception:
+        pass
 
 # ---------------------- メイン ----------------------
 def main():
@@ -553,7 +629,7 @@ def main():
         f"""
 <div class="app-hero jp-sans">
   <div class="app-hero-title">🏗️ {APP_TITLE}</div>
-  <div class="app-hero-sub">スマホ最適 / 複数画像（可視・赤外）× RAG × ドメイン知識 × Gemini 2.5 Flash</div>
+  <div class="app-hero-sub">スマホ最適 / 複数画像（可視・赤外）× RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash</div>
 </div>
         """,
         unsafe_allow_html=True
@@ -565,27 +641,34 @@ def main():
     user_q = st.text_input("例：外壁タイルのひび割れ基準と推定寿命、雨漏り原因特定など", "", placeholder="分析したいテーマ・質問を入力")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # 2) 画像（★背面カメラ初期、複数可）
+    # 2) Web検索併用（任意）
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">2) 画像入力（可視/赤外：複数可）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="md-title">2) RAG不足時の Web検索 併用（任意・公的サイト優先）</div>', unsafe_allow_html=True)
+    use_web = st.toggle("RAGで不足する場合は Web検索も併用（.go.jp / PDF を優先・出典URL併記）", value=False)
+    st.caption("Bing または SerpAPI の APIキーが secrets に設定されている場合のみ有効。")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # 3) 画像（複数・背面カメラ優先）
+    st.markdown('<div class="md-card">', unsafe_allow_html=True)
+    st.markdown('<div class="md-title">3) 画像入力（可視/赤外：複数可）</div>', unsafe_allow_html=True)
     colA, colB = st.columns(2)
 
     with colA:
         st.markdown("**可視（複数）**")
-        # --- 背面カメラ（推奨） ---
         if HAVE_BACK_CAM:
-            st.caption("📷 リアカメラで撮影 → 下の『可視に追加』でギャラリーへ")
+            st.caption("📷 リアカメラで撮影 → 『可視に追加』でギャラリーへ")
             bc_img = back_camera_input(key="vis_back")
-            if st.button("➕ 撮影画像を可視に追加", use_container_width=True) and bc_img is not None:
+            if st.button("➕ 撮影画像を可視に追加", use_container_width=True):
                 try:
-                    if isinstance(bc_img, Image.Image):
-                        add_to_gallery(bc_img, "vis_gallery")
-                    else:
-                        add_to_gallery(Image.open(io.BytesIO(bc_img)), "vis_gallery")
+                    if bc_img is not None:
+                        if isinstance(bc_img, Image.Image):
+                            add_to_gallery(bc_img, "vis_gallery")
+                        else:
+                            add_to_gallery(Image.open(io.BytesIO(bc_img)), "vis_gallery")
                 except Exception:
                     st.warning("撮影画像の追加に失敗しました。")
         else:
-            st.info("背面カメラ用コンポーネントが未インストールのため、標準カメラにフォールバックします。")
+            st.info("背面カメラコンポーネントが未インストールのため、標準カメラにフォールバックします。")
 
         vis_cam = st.camera_input("カメラで撮影（フォールバック）", key="vis_cam")
         if st.button("➕ 撮影画像を可視に追加（フォールバック）", use_container_width=True) and vis_cam is not None:
@@ -595,53 +678,64 @@ def main():
                 st.warning("撮影画像の追加に失敗しました。")
 
         vis_files = st.file_uploader("可視画像を選択（複数可：JPG/PNG）", type=["jpg","jpeg","png"], accept_multiple_files=True, key="vis_up")
-        if vis_files:
-            if st.button("📥 選択した可視画像をすべて追加", use_container_width=True):
-                for f in vis_files:
-                    try:
-                        add_to_gallery(Image.open(f), "vis_gallery")
-                    except Exception:
-                        pass
+        if vis_files and st.button("📥 選択した可視画像をすべて追加", use_container_width=True):
+            for f in vis_files:
+                try:
+                    add_to_gallery(Image.open(f), "vis_gallery")
+                except Exception:
+                    pass
 
     with colB:
         st.markdown("**赤外線（IR）（複数）**")
         ir_files = st.file_uploader("IR画像を選択（複数可：JPG/PNG）", type=["jpg","jpeg","png"], accept_multiple_files=True, key="ir_up")
-        if ir_files:
-            if st.button("📥 選択したIR画像をすべて追加", use_container_width=True):
-                for f in ir_files:
-                    try:
-                        add_to_gallery(Image.open(f), "ir_gallery")
-                    except Exception:
-                        pass
+        if ir_files and st.button("📥 選択したIR画像をすべて追加", use_container_width=True):
+            for f in ir_files:
+                try:
+                    add_to_gallery(Image.open(f), "ir_gallery")
+                except Exception:
+                    pass
         with st.expander("IRメタデータ（任意・精度向上）"):
-            ir_emiss = st.text_input("放射率 ε（例:0.95）", "")
-            ir_tref  = st.text_input("反射温度 T_ref[℃]（例:20）", "")
-            ir_tamb  = st.text_input("外気温 T_amb[℃]（例:22）", "")
-            ir_rh    = st.text_input("相対湿度 RH[%]（例:65）", "")
-            ir_dist  = st.text_input("撮影距離[m]（例:5）", "")
-            ir_ang   = st.text_input("撮影角度[°]（例:10）", "")
+            st.session_state["ir_emiss"] = st.text_input("放射率 ε（例:0.95）", st.session_state.get("ir_emiss",""))
+            st.session_state["ir_tref"]  = st.text_input("反射温度 T_ref[℃]（例:20）", st.session_state.get("ir_tref",""))
+            st.session_state["ir_tamb"]  = st.text_input("外気温 T_amb[℃]（例:22）", st.session_state.get("ir_tamb",""))
+            st.session_state["ir_rh"]    = st.text_input("相対湿度 RH[%]（例:65）", st.session_state.get("ir_rh",""))
+            st.session_state["ir_dist"]  = st.text_input("撮影距離[m]（例:5）", st.session_state.get("ir_dist",""))
+            st.session_state["ir_ang"]   = st.text_input("撮影角度[°]（例:10）", st.session_state.get("ir_ang",""))
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # ギャラリー表示
+    # ギャラリー（削除ボタン付）
     if st.session_state["vis_gallery"] or st.session_state["ir_gallery"]:
         st.markdown('<div class="md-card">', unsafe_allow_html=True)
         st.markdown('<div class="md-title">画像ギャラリー（上限8枚／古い順に入替）</div>', unsafe_allow_html=True)
-        cols = st.columns(4)
-        idx = 0
-        for img in st.session_state["vis_gallery"]:
-            with cols[idx % 4]:
-                st.image(img, caption="可視", use_container_width=True)
-            idx += 1
-        for img in st.session_state["ir_gallery"]:
-            with cols[idx % 4]:
-                st.image(img, caption="IR", use_container_width=True)
-            idx += 1
+
+        # 可視
+        if st.session_state["vis_gallery"]:
+            st.markdown("**可視**")
+            cols = st.columns(4)
+            for i, img in enumerate(st.session_state["vis_gallery"]):
+                with cols[i % 4]:
+                    st.image(img, use_container_width=True)
+                    if st.button(f"🗑️ 削除 可視 {i+1}", key=f"del_vis_{i}", use_container_width=True):
+                        remove_from_gallery("vis_gallery", i)
+                        st.experimental_rerun()
+
+        # IR
+        if st.session_state["ir_gallery"]:
+            st.markdown("**IR**")
+            cols2 = st.columns(4)
+            for j, img in enumerate(st.session_state["ir_gallery"]):
+                with cols2[j % 4]:
+                    st.image(img, use_container_width=True)
+                    if st.button(f"🗑️ 削除 IR {j+1}", key=f"del_ir_{j}", use_container_width=True):
+                        remove_from_gallery("ir_gallery", j)
+                        st.experimental_rerun()
+
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 3) 位置
+    # 4) 位置
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">3) 位置情報（現在地 or 手入力）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="md-title">4) 位置情報（現在地 or 手入力）</div>', unsafe_allow_html=True)
     lat_val: Optional[float] = None
     lon_val: Optional[float] = None
     if HAVE_GEO:
@@ -683,58 +777,67 @@ def main():
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # 4) 実行
+    # 5) 実行
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">4) 解析の実行</div>', unsafe_allow_html=True)
-    run = st.button("🔎 サンプル級レベルで詳細分析（RAG + 複数画像 + ドメイン知識）", use_container_width=True)
+    st.markdown('<div class="md-title">5) 解析の実行</div>', unsafe_allow_html=True)
+    run = st.button("🔎 サンプル級レベルで詳細分析（RAG + Web任意 + 複数画像 + ドメイン知識）", use_container_width=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
     if run:
+        # 進捗UI
+        progress = st.progress(0, text="前提チェック中…")
+        step = 0
+
+        # 入力検証
         if not user_q:
             st.error("質問を入力してください。")
             return
         if not (st.session_state["vis_gallery"] or st.session_state["ir_gallery"]):
             st.warning("少なくとも1枚の画像（可視またはIR）を追加してください。")
             return
+        step += 10; progress.progress(step, text="RAG準備中…")
 
-        # 画像所見（可視/IR 複数）
+        # RAG
+        snippets = rag_search(user_q, have_ir=bool(st.session_state["ir_gallery"]), k=MAX_SNIPPETS)
+        step += 20; progress.progress(step, text="画像所見の集約中…")
+
+        # 画像所見
         vis_list = [analyze_visual(img) for img in st.session_state["vis_gallery"]]
         ir_meta = {
-            "emissivity": (locals().get('ir_emiss') or "不明").strip(),
-            "t_ref": (locals().get('ir_tref') or "不明").strip(),
-            "t_amb": (locals().get('ir_tamb') or "不明").strip(),
-            "rh": (locals().get('ir_rh') or "不明").strip(),
-            "dist": (locals().get('ir_dist') or "不明").strip(),
-            "angle": (locals().get('ir_ang') or "不明").strip(),
+            "emissivity": (st.session_state.get('ir_emiss') or "不明").strip(),
+            "t_ref": (st.session_state.get('ir_tref') or "不明").strip(),
+            "t_amb": (st.session_state.get('ir_tamb') or "不明").strip(),
+            "rh": (st.session_state.get('ir_rh') or "不明").strip(),
+            "dist": (st.session_state.get('ir_dist') or "不明").strip(),
+            "angle": (st.session_state.get('ir_ang') or "不明").strip(),
         }
         ir_list = [analyze_ir(img, ir_meta) for img in st.session_state["ir_gallery"]]
+        step += 15; progress.progress(step, text="暫定評価を計算中…")
 
-        # ルールベース暫定
+        # 暫定評価
         rule_grade, rule_reason = rule_based_grade(vis_list, ir_list)
         rule_life = rule_based_life(rule_grade)
+        step += 10; progress.progress(step, text="Web検索（任意）を実行中…")
 
-        # RAG検索
-        snippets = rag_search(user_q, have_ir=bool(ir_list), k=MAX_SNIPPETS)
-
-        # ドメイン一般原則
-        priors = domain_priors_text()
+        # Web検索（任意）
+        web_snips: List[Dict[str, Any]] = []
+        if use_web:
+            web_snips = web_search_snippets(user_q, max_items=3)
+        step += 10; progress.progress(step, text="プロンプトを作成中…")
 
         # 画像 → Gemini parts
         image_parts = []
-        # 可視 → 先に
         for img in st.session_state["vis_gallery"]:
             image_parts.append(image_to_inline_part(img))
-        # IR → 後に
         for img in st.session_state["ir_gallery"]:
             image_parts.append(image_to_inline_part(img))
 
-        # IRメタ注記
         ir_meta_note = (
             "注: 赤外線画像はJPEG相対評価。放射率/反射温度/外気温/湿度/距離/角度/風/日射等に影響され、"
             "絶対温度は扱わない。雨直後・散水直後・非日射時間帯での再撮影が有効。"
         )
 
-        # サンプル級（雨漏り診断報告書）プロンプト
+        priors = domain_priors_text()
         prompt = build_master_prompt_for_rain_leak(
             user_q=user_q,
             rag_snippets=snippets,
@@ -743,37 +846,41 @@ def main():
             ir_list=ir_list,
             rule_grade=rule_grade,
             rule_life=rule_life,
-            ir_meta_note=ir_meta_note
+            ir_meta_note=ir_meta_note,
+            web_snippets=web_snips if use_web else None
         )
 
-        # API
+        step += 10; progress.progress(step, text="Gemini API に送信中…")
+
+        # API キー
         try:
             api_key = st.secrets["gemini"]["API_KEY"]
         except (KeyError, FileNotFoundError):
+            progress.empty()
             st.error("Gemini API Key が未設定です。.streamlit/secrets.toml に [gemini].API_KEY を設定してください。")
             return
 
-        with st.spinner("Gemini 2.5 Flash が分析中…（サンプル級テンプレートで生成）"):
-            try:
-                result = call_gemini(api_key, prompt, image_parts)
-                report_md = extract_text_from_gemini(result)
-            except requests.HTTPError as e:
-                st.error(f"APIエラー: {e.response.status_code} {e.response.reason}\n{e.response.text[:500]}")
-                return
-            except Exception as e:
-                st.error(f"呼び出しエラー: {e}")
-                return
+        # 呼び出し
+        try:
+            result = call_gemini(api_key, prompt, image_parts)
+            report_md = extract_text_from_gemini(result)
+        except requests.HTTPError as e:
+            progress.empty()
+            st.error(f"APIエラー: {e.response.status_code} {e.response.reason}\n{e.response.text[:500]}")
+            return
+        except Exception as e:
+            progress.empty()
+            st.error(f"呼び出しエラー: {e}")
+            return
+
+        step = 95; progress.progress(step, text="レポート整形中…")
 
         if not report_md:
+            progress.empty()
             st.warning("レポートが空でした。入力（質問/画像/PDF）を見直してください。")
             return
 
-        # 5) 結果表示（総合評価 → 詳細）
-        st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
-        st.markdown('<div class="md-title">5) 解析結果</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        # 先頭に総合評価抜粋
+        # 結果表示：総合評価 → 詳細
         summary_block = None
         try:
             pattern = r"(?:^|\n)##?\s*総合評価[\s\S]*?(?=\n##?\s|\Z)"
@@ -783,6 +890,10 @@ def main():
         except Exception:
             summary_block = None
 
+        st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
+        st.markdown('<div class="md-title">6) 解析結果</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
         if summary_block:
             st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
             st.markdown('<div class="md-title">🧭 総合評価（先頭要約）</div>', unsafe_allow_html=True)
@@ -790,37 +901,55 @@ def main():
             st.markdown('</div>', unsafe_allow_html=True)
 
         with st.expander("詳細レポートを表示（Word貼付け可）", expanded=(summary_block is None)):
-            # 暫定評価も参考として提示
             st.markdown("**（参考）画像＋一般原則による暫定評価**")
             st.markdown(f"- 暫定グレード: `{rule_grade}`（{rule_reason}）")
             st.markdown(f"- 参考寿命: `{rule_life}`")
             st.markdown("---")
             st.markdown(f"<div class='jp-report'>{report_md}</div>", unsafe_allow_html=True)
 
-            # Wordコピペ用（プレーンテキスト）
+            # Wordコピペ用テキスト
             st.markdown("###### 📋 Word貼付け用テキスト（全選択→コピー）")
-            st.text_area("",
-                         value=report_md,
-                         height=260,
-                         label_visibility="collapsed")
+            st.text_area("", value=report_md, height=260, label_visibility="collapsed")
 
-        # ダウンロード
-        st.download_button(
-            "📄 レポートをダウンロード（Markdown）",
-            report_md,
-            file_name="building_health_report.md",
-            mime="text/markdown",
-            use_container_width=True
-        )
-        st.download_button(
-            "📄 レポートをダウンロード（TXT／Word向け）",
-            report_md,
-            file_name="building_health_report.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+        # ダウンロード（MD / TXT with BOM）
+        md_bytes = report_md.encode("utf-8")
+        txt_bytes = report_md.encode("utf-8-sig")  # ★BOM付きで文字化け回避
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                "📄 レポートをダウンロード（Markdown）",
+                md_bytes,
+                file_name="building_health_report.md",
+                mime="text/markdown",
+                use_container_width=True
+            )
+        with col_dl2:
+            st.download_button(
+                "📄 レポートをダウンロード（TXT／Word向け・BOM付）",
+                txt_bytes,
+                file_name="building_health_report.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
 
-    st.caption("© 建物診断くん — 複数画像 × RAG × ドメイン知識 × Gemini 2.5 Flash。")
+        # 参考：使用したRAG抜粋＋Web
+        with st.expander("（参考）使用した根拠抜粋（RAG / Web）"):
+            if snippets:
+                st.markdown("**RAG（PDF）**")
+                for d in snippets:
+                    snippet = d["text"][:600] + ('…' if len(d["text"]) > 600 else '')
+                    pg = f" p.{d['page_start']}" if d.get("page_start") else ""
+                    st.markdown(f"<div class='jp-report'><b>{d['doc']}{pg}</b>：{snippet}</div>", unsafe_allow_html=True)
+            if use_web and web_snips:
+                st.markdown("**Web（参考）**")
+                for d in web_snips:
+                    snippet = d["text"][:600] + ('…' if len(d["text"]) > 600 else '')
+                    st.markdown(f"<div class='jp-report'><b>{d['doc']}</b>：{snippet}</div>", unsafe_allow_html=True)
+
+        progress.progress(100, text="完了")
+        progress.empty()
+
+    st.caption("© 建物診断くん — 複数画像 × RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash。")
 
 if __name__ == "__main__":
     main()
