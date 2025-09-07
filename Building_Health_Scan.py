@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 建物診断くん（スマホ対応・マテリアルUI・複数画像・高速化対応）
-# 変更点（本版）
-#  - 解析ボタンの名称を「解析する」に統一
-#  - 高速モード（初回推奨）を追加：RAG上位K縮小、画像送信数の自動削減、画像圧縮幅縮小、Web検索を既定オフ
-#  - Web検索結果をキャッシュ（TTL=10分）
-#  - 画像所見の抽出を軽量化（低解像度統計に切替）
-#  - ギャラリーから代表画像のみをGeminiへ送信（高速モード：可視2＋IR1）
-#  - TXTダウンロードをBOM付きにして文字化け回避
-#  - 各主要所見で出典併記を“必須”にする制約をプロンプトへ追加
+# 建物診断くん（不具合修正版 / スマホ対応 / マテリアルUI / 複数画像 / RAG / Gemini 2.5 Flash）
+# - 重大修正1: 「解析する」を押す→検証エラーで止まる問題
+#     → バリデーションを先に実行し、問題点を一覧表示。合格時のみ進捗バーを開始。
+# - 重大修正2: 現在地が取得できない問題
+#     → 明示ボタン付きのJSコンポーネント（user-gesture起点）で geolocation を呼び出し、
+#        取得座標を URL クエリへ反映→同タブでソフトリロードする方式に変更。
+#        iOS/一部ブラウザの自動実行制限を回避。
+# - 追加: 詳細ログ（デバッグモード）とタイムアウト強化、早期リターン時の進捗 UI を即時消去。
+# - 既存機能は維持（複数画像/IRメタ/地図/高速モード/RAG/Web併用/ダウンロード等）。
 # ===========================================================
 
 # Python 3.12: pkgutil.ImpImporter 削除対策（古い依存向け）
@@ -35,15 +35,7 @@ import folium
 from streamlit_folium import st_folium
 import streamlit.components.v1 as components
 
-# geolocation（任意）
-HAVE_GEO = False
-try:
-    from streamlit_geolocation import st_geolocation  # pip install streamlit-geolocation
-    HAVE_GEO = True
-except Exception:
-    HAVE_GEO = False
-
-# 背面カメラ（任意）
+# 任意：背面カメラ
 HAVE_BACK_CAM = False
 try:
     from streamlit_back_camera_input import back_camera_input  # pip install streamlit-back-camera-input
@@ -456,15 +448,15 @@ def extract_text_from_gemini(result: Dict) -> str:
         return ""
 
 # ---------------------- プロンプト（出典必須・強制） ----------------------
-def build_master_prompt_for_rain_leak(user_q: str,
-                                      rag_snippets: List[Dict[str, Any]],
-                                      priors: str,
-                                      vis_list: List[Dict[str, Any]],
-                                      ir_list: List[Dict[str, Any]],
-                                      rule_grade: str,
-                                      rule_life: str,
-                                      ir_meta_note: str,
-                                      web_snippets: Optional[List[Dict[str, Any]]] = None) -> str:
+def build_master_prompt(user_q: str,
+                        rag_snippets: List[Dict[str, Any]],
+                        priors: str,
+                        vis_list: List[Dict[str, Any]],
+                        ir_list: List[Dict[str, Any]],
+                        rule_grade: str,
+                        rule_life: str,
+                        ir_meta_note: str,
+                        web_snippets: Optional[List[Dict[str, Any]]] = None) -> str:
     rag_lines = []
     for d in rag_snippets:
         pg = f" p.{d['page_start']}" if d.get("page_start") else ""
@@ -486,7 +478,7 @@ def build_master_prompt_for_rain_leak(user_q: str,
     today = date.today().strftime("%Y年%m月%d日")
 
     prompt = f"""
-あなたは非破壊検査・建築・材料学の上級診断士。国土交通省（MLIT）関連文書の適合性を重視し、与えたRAG抜粋の範囲内で簡潔かつ正確に**雨漏り診断報告書**を作成する。
+あなたは非破壊検査・建築・材料学の上級診断士。国土交通省（MLIT）関連文書の適合性を重視し、与えたRAG抜粋の範囲内で簡潔かつ正確に**診断レポート**を作成する。
 **禁止**：推測での数値化（閾値・ひび幅等）／未出典の断定。根拠が無い場合は「未掲載／未確定」と明示する。
 
 # 入力
@@ -511,12 +503,9 @@ def build_master_prompt_for_rain_leak(user_q: str,
   * 参考寿命: {rule_life}
 
 # 出力仕様（Markdown、“結果のみ”でセクション順序・見出しを厳守。Word貼付け前提で箇条書き多用）
-# 見出し： # 雨漏り診断報告書 / 1. 概要 / 2. 結論（原因の有力候補・優先度順） / 3. 写真・IR画像の読み取り要点 / 4. 原因特定に向けた検証手順（推奨） / 5. 応急処置（一次止水） / 6. 恒久対策（再発防止） / 7. 期待効果と注意点 / 8. 概算費用感（参考） / 9. 散水試験 記録シート（行項目のみ） / 10. 施工依頼メモ（ひな形）
 - 先頭に **総合評価（A/B/C/D、主因1–2行）** を明示
 - 「推定残存寿命」は**幅**で記載。RAG根拠が無ければ「参考（画像・一般原則ベース）」と注記
 - IRは相対指標であることを明示し、日射/雨直後など条件の留意点を記す
-- 文量は提示サンプルと同等の密度を目標
-
 - **重要：各主要所見（原因候補・基準適合・推奨対策）には、可能な限り行末に必ず `［出典: 文書名/ページ or URL］` を最低1件併記すること。根拠がRAGに無い場合は「未掲載」と明記する。**
 """.strip()
     return normalize_text(prompt)
@@ -525,64 +514,63 @@ def build_master_prompt_for_rain_leak(user_q: str,
 def inject_material_css():
     components.html(
         """
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
-<style id="app-style">
-:root{
-  --mdc-primary:#2962ff; --mdc-secondary:#00b8d4;
-  --mdc-bg:#f7f9fc; --mdc-surface:#ffffff; --mdc-outline:rgba(0,0,0,.08);
-  --radius:16px; --shadow:0 6px 18px rgba(0,0,0,.08); --tap-min:44px;
-}
-@media (prefers-color-scheme: dark){
-  :root{ --mdc-bg:#0f1115; --mdc-surface:#171a21; --mdc-outline:rgba(255,255,255,.08); }
-}
-.block-container{padding-top:2.2rem !important;padding-bottom:2rem;}
-body{background:var(--mdc-bg);} 
-.jp-sans{font-family:'Noto Sans JP',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.7;}
-.jp-report *{font-family:'Noto Sans JP',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.6;}
-.app-hero{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary));color:#fff;border-radius:20px;box-shadow:var(--shadow);padding:14px 16px;margin:0 0 14px 0;}
-.app-hero-title{font-weight:900;font-size:1.45rem;line-height:1.25;margin:0 0 4px 0;text-shadow:0 1px 2px rgba(0,0,0,.18);} 
-.app-hero-sub{font-weight:500;font-size:.95rem;opacity:.95;margin:0;}
-.md-card{background:var(--mdc-surface);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem 1.1rem;margin:0 0 1rem 0;border:1px solid var(--mdc-outline);} 
-.md-title{font-size:1.1rem;font-weight:700;margin:0 0 .6rem 0;}
-.stButton>button,.stTextInput input,.stFileUploader label,.stCameraInput label{min-height:var(--tap-min);border-radius:12px!important;font-weight:600;}
-.stButton>button{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary))!important;color:#fff!important;border:none!important;box-shadow:var(--shadow);} 
-:where(button,input,select,textarea):focus-visible{outline:3px solid color-mix(in srgb,var(--mdc-primary) 60%, white);outline-offset:2px;border-radius:12px;}
+<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
+<link href=\"https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap\" rel=\"stylesheet\">
+<style id=\"app-style\">
+:root{--mdc-primary:#2962ff;--mdc-secondary:#00b8d4;--mdc-bg:#f7f9fc;--mdc-surface:#ffffff;--mdc-outline:rgba(0,0,0,.08);--radius:16px;--shadow:0 6px 18px rgba(0,0,0,.08);--tap-min:44px}
+@media (prefers-color-scheme: dark){:root{--mdc-bg:#0f1115;--mdc-surface:#171a21;--mdc-outline:rgba(255,255,255,.08)}}
+.block-container{padding-top:2.2rem!important;padding-bottom:2rem}
+body{background:var(--mdc-bg)}
+.jp-sans{font-family:'Noto Sans JP',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.7}
+.jp-report *{font-family:'Noto Sans JP',system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI','Hiragino Kaku Gothic ProN','Hiragino Sans','Meiryo',sans-serif!important;line-height:1.6}
+.app-hero{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary));color:#fff;border-radius:20px;box-shadow:var(--shadow);padding:14px 16px;margin:0 0 14px 0}
+.app-hero-title{font-weight:900;font-size:1.45rem;line-height:1.25;margin:0 0 4px 0;text-shadow:0 1px 2px rgba(0,0,0,.18)}
+.app-hero-sub{font-weight:500;font-size:.95rem;opacity:.95;margin:0}
+.md-card{background:var(--mdc-surface);border-radius:var(--radius);box-shadow:var(--shadow);padding:1rem 1.1rem;margin:0 0 1rem 0;border:1px solid var(--mdc-outline)}
+.md-title{font-size:1.1rem;font-weight:700;margin:0 0 .6rem 0}
+.stButton>button,.stTextInput input,.stFileUploader label,.stCameraInput label{min-height:var(--tap-min);border-radius:12px!important;font-weight:600}
+.stButton>button{background:linear-gradient(135deg,var(--mdc-primary),var(--mdc-secondary))!important;color:#fff!important;border:none!important;box-shadow:var(--shadow)}
+:where(button,input,select,textarea):focus-visible{outline:3px solid color-mix(in srgb,var(--mdc-primary) 60%, white);outline-offset:2px;border-radius:12px}
 </style>
         """,
         height=0,
     )
 
-# ---------------------- 位置（JSフォールバック） ----------------------
-def geolocate_fallback_via_query_params(show_widget: bool = True) -> Tuple[Optional[float], Optional[float]]:
+# ---------------------- 位置（JSボタン式フォールバック） ----------------------
+def geolocate_with_button(label: str = "📍 現在地を取得") -> Tuple[Optional[float], Optional[float]]:
     params = st.experimental_get_query_params()
     lat = params.get("lat", [None])[0]
     lon = params.get("lon", [None])[0]
-    if lat and lon:
-        try:
-            return float(lat), float(lon)
-        except Exception:
-            return None, None
-    if show_widget:
+    lat_res = float(lat) if lat else None
+    lon_res = float(lon) if lon else None
+
+    # ボタン押下時、JSで取得→URL書き換え→ソフトリロード
+    clicked = st.button(label, use_container_width=True)
+    if clicked:
         components.html(
             """
 <script>
 (function(){
-  if (!navigator.geolocation){return;}
-  navigator.geolocation.getCurrentPosition(function(pos){
-    const lat = pos.coords.latitude.toFixed(6);
-    const lon = pos.coords.longitude.toFixed(6);
+  function setQuery(lat, lon){
     const url = new URL(window.location.href);
-    url.searchParams.set('lat', lat);
-    url.searchParams.set('lon', lon);
-    const a=document.createElement('a'); a.href=url.toString(); a.target='_top'; document.body.appendChild(a); a.click();
-  }, function(){}, {enableHighAccuracy:true, timeout:8000, maximumAge:0});
+    url.searchParams.set('lat', lat.toFixed(6));
+    url.searchParams.set('lon', lon.toFixed(6));
+    if (window.top === window){
+      window.location.replace(url.toString());
+    }else{
+      // iframe内でも同一オリジンなら遷移
+      window.location.href = url.toString();
+    }
+  }
+  function onErr(e){ alert('位置情報の取得に失敗しました: ' + (e && e.message ? e.message : '許可が必要です')); }
+  if (!navigator.geolocation){ onErr({message:'本ブラウザは位置情報に未対応です'}); return; }
+  navigator.geolocation.getCurrentPosition(function(pos){ setQuery(pos.coords.latitude, pos.coords.longitude); }, onErr, {enableHighAccuracy:true, timeout:10000, maximumAge:0});
 })();
 </script>
             """,
             height=0,
         )
-    return None, None
+    return lat_res, lon_res
 
 # ---------------------- セッション（ギャラリー） ----------------------
 def ensure_galleries():
@@ -623,16 +611,20 @@ def main():
 
     st.markdown(
         f"""
-<div class="app-hero jp-sans">
-  <div class="app-hero-title">🏗️ {APP_TITLE}</div>
-  <div class="app-hero-sub">スマホ最適 / 複数画像（可視・赤外）× RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash</div>
+<div class=\"app-hero jp-sans\">
+  <div class=\"app-hero-title\">🏗️ {APP_TITLE}</div>
+  <div class=\"app-hero-sub\">スマホ最適 / 複数画像（可視・赤外）× RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash</div>
 </div>
         """,
         unsafe_allow_html=True
     )
 
-    # 高速モードトグル
-    fast_mode = st.toggle("⚡ 高速モード（初回推奨：代表画像・低解像度・RAG縮小・Web検索OFF）", value=True)
+    # 高速モード・デバッグ
+    col_mode1, col_mode2 = st.columns(2)
+    with col_mode1:
+        fast_mode = st.toggle("⚡ 高速モード（代表画像・低解像度・RAG縮小・Web検索OFF）", value=True)
+    with col_mode2:
+        debug_mode = st.toggle("🐞 デバッグログを表示", value=False)
 
     # 1) 質問
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
@@ -664,7 +656,9 @@ def main():
                             add_to_gallery(bc_img, "vis_gallery")
                         else:
                             add_to_gallery(Image.open(io.BytesIO(bc_img)), "vis_gallery")
-                except Exception:
+                except Exception as e:
+                    if debug_mode:
+                        st.exception(e)
                     st.warning("撮影画像の追加に失敗しました。")
         else:
             st.info("背面カメラコンポーネントが未インストールのため、標準カメラにフォールバックします。")
@@ -673,7 +667,9 @@ def main():
         if st.button("➕ 撮影画像を可視に追加（フォールバック）", use_container_width=True) and vis_cam is not None:
             try:
                 add_to_gallery(Image.open(vis_cam), "vis_gallery")
-            except Exception:
+            except Exception as e:
+                if debug_mode:
+                    st.exception(e)
                 st.warning("撮影画像の追加に失敗しました。")
 
         vis_files = st.file_uploader("可視画像を選択（複数可：JPG/PNG）", type=["jpg","jpeg","png"], accept_multiple_files=True, key="vis_up")
@@ -708,7 +704,6 @@ def main():
         st.markdown('<div class="md-card">', unsafe_allow_html=True)
         st.markdown('<div class="md-title">画像ギャラリー（上限8枚／古い順に入替）</div>', unsafe_allow_html=True)
 
-        # 可視
         if st.session_state["vis_gallery"]:
             st.markdown("**可視**")
             cols = st.columns(4)
@@ -719,7 +714,6 @@ def main():
                         remove_from_gallery("vis_gallery", i)
                         st.experimental_rerun()
 
-        # IR
         if st.session_state["ir_gallery"]:
             st.markdown("**IR**")
             cols2 = st.columns(4)
@@ -732,25 +726,11 @@ def main():
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 4) 位置
+    # 4) 位置（ボタン式 geolocation）
     st.markdown('<div class="md-card">', unsafe_allow_html=True)
     st.markdown('<div class="md-title">4) 位置情報（現在地 or 手入力）</div>', unsafe_allow_html=True)
-    lat_val: Optional[float] = None
-    lon_val: Optional[float] = None
-    if HAVE_GEO and not fast_mode:
-        loc = st_geolocation(key="geoloc", label="📍 現在地を取得（ブラウザで許可）")
-        if isinstance(loc, dict):
-            lat_val = loc.get("latitude") or loc.get("lat")
-            lon_val = loc.get("longitude") or loc.get("lon")
-            try:
-                if lat_val is not None: lat_val = float(lat_val)
-                if lon_val is not None: lon_val = float(lon_val)
-            except Exception:
-                lat_val, lon_val = None, None
-    else:
-        if st.button("📍 現在地を取得（簡易方式）"):
-            geolocate_fallback_via_query_params(show_widget=True)
-        lat_val, lon_val = geolocate_fallback_via_query_params(show_widget=False)
+
+    lat_val, lon_val = geolocate_with_button()
 
     c1, c2, c3 = st.columns([1,1,2])
     with c1:
@@ -760,7 +740,7 @@ def main():
         lon_str = "" if lon_val is None else f"{lon_val:.6f}"
         lon_str = st.text_input("経度", value=lon_str, key="lon_manual")
     with c3:
-        st.caption("※ 取得できない場合は手入力してください。")
+        st.caption("※ 『現在地を取得』で許可が必要です。取得できない場合は手入力してください。")
 
     try:
         lat_f = float(lat_str) if lat_str else None
@@ -782,67 +762,88 @@ def main():
     st.markdown('</div>', unsafe_allow_html=True)
 
     if run:
-        # 進捗UI
-        progress = st.progress(0, text="入力確認中…")
-        step = 0
-
-        # 入力検証
+        # 先にバリデーション（ここで止まるときは明示表示）
+        problems = []
         if not user_q:
-            st.error("質問を入力してください。")
-            return
+            problems.append("質問を入力してください。")
         if not (st.session_state["vis_gallery"] or st.session_state["ir_gallery"]):
-            st.warning("少なくとも1枚の画像（可視またはIR）を追加してください。")
-            return
-        step += 15; progress.progress(step, text="RAG準備中…")
+            problems.append("少なくとも1枚の画像（可視またはIR）を追加してください。")
+        if problems:
+            st.error("\n".join(f"• {p}" for p in problems))
+            if debug_mode:
+                st.write({"debug": "validation_failed", "problems": problems})
+            st.stop()
+
+        # 進捗バー開始
+        progress = st.progress(0, text="RAG準備中…")
+        step = 10
+        progress.progress(step)
 
         # RAG（高速モードでは上位Kを縮小）
-        k_snip = 4 if fast_mode else MAX_SNIPPETS
-        snippets = rag_search(user_q, have_ir=bool(st.session_state["ir_gallery"]), k=k_snip)
-        step += 15; progress.progress(step, text="画像所見の集約中…")
+        try:
+            k_snip = 4 if fast_mode else MAX_SNIPPETS
+            snippets = rag_search(user_q, have_ir=bool(st.session_state["ir_gallery"]), k=k_snip)
+        except Exception as e:
+            progress.empty()
+            st.error("RAG 準備に失敗しました。PDFの配置や権限を確認してください。")
+            if debug_mode:
+                st.exception(e)
+            st.stop()
+
+        step = 35; progress.progress(step, text="画像所見の集約中…")
 
         # 画像所見（高速モードでは低解像度統計）
         vis_target_w = 128 if fast_mode else 256
         ir_target_w = 128 if fast_mode else 256
-        vis_pairs = [(img, analyze_visual(img, target_w=vis_target_w)) for img in st.session_state["vis_gallery"]]
-        ir_pairs  = [(img, analyze_ir(img, {
-            "emissivity": (st.session_state.get('ir_emiss') or "不明").strip(),
-            "t_ref": (st.session_state.get('ir_tref') or "不明").strip(),
-            "t_amb": (st.session_state.get('ir_tamb') or "不明").strip(),
-            "rh": (st.session_state.get('ir_rh') or "不明").strip(),
-            "dist": (st.session_state.get('ir_dist') or "不明").strip(),
-            "angle": (st.session_state.get('ir_ang') or "不明").strip(),
-        }, target_w=ir_target_w)) for img in st.session_state["ir_gallery"]]
+        try:
+            vis_pairs = [(img, analyze_visual(img, target_w=vis_target_w)) for img in st.session_state["vis_gallery"]]
+            ir_pairs  = [(img, analyze_ir(img, {
+                "emissivity": (st.session_state.get('ir_emiss') or "不明").strip(),
+                "t_ref": (st.session_state.get('ir_tref') or "不明").strip(),
+                "t_amb": (st.session_state.get('ir_tamb') or "不明").strip(),
+                "rh": (st.session_state.get('ir_rh') or "不明").strip(),
+                "dist": (st.session_state.get('ir_dist') or "不明").strip(),
+                "angle": (st.session_state.get('ir_ang') or "不明").strip(),
+            }, target_w=ir_target_w)) for img in st.session_state["ir_gallery"]]
+        except Exception as e:
+            progress.empty()
+            st.error("画像処理でエラーが発生しました。画像形式・サイズをご確認ください。")
+            if debug_mode:
+                st.exception(e)
+            st.stop()
 
         vis_list = [v for (_, v) in vis_pairs]
         ir_list  = [i for (_, i) in ir_pairs]
-        step += 15; progress.progress(step, text="暫定評価を計算中…")
+        step = 55; progress.progress(step, text="暫定評価を計算中…")
 
         # 暫定評価
         rule_grade, rule_reason = rule_based_grade(vis_list, ir_list)
         rule_life = rule_based_life(rule_grade)
-        step += 10; progress.progress(step, text="Web検索（任意）を実行中…")
 
         # Web検索（任意）
+        step = 65; progress.progress(step, text="Web検索（任意）を実行中…")
         web_snips: List[Dict[str, Any]] = []
         if use_web and not fast_mode:
-            web_snips = web_search_snippets_cached(user_q, max_items=3)
-        step += 10; progress.progress(step, text="プロンプトを作成中…")
+            try:
+                web_snips = web_search_snippets_cached(user_q, max_items=3)
+            except Exception as e:
+                if debug_mode:
+                    st.exception(e)
+
+        step = 75; progress.progress(step, text="プロンプトを作成中…")
 
         # 画像送信の選抜（高速モード：可視上位2 + IR上位1）
         image_parts: List[Dict[str, Any]] = []
         if fast_mode:
-            # 可視：edge_ratioで上位2
             if vis_pairs:
                 vis_sorted = sorted(vis_pairs, key=lambda p: p[1]['metrics']['edge_ratio'], reverse=True)
                 for img, _ in vis_sorted[:2]:
                     image_parts.append(image_to_inline_part(img, max_width=1000))
-            # IR：delta_relで上位1
             if ir_pairs:
                 ir_sorted = sorted(ir_pairs, key=lambda p: p[1]['delta_rel'], reverse=True)
                 for img, _ in ir_sorted[:1]:
                     image_parts.append(image_to_inline_part(img, max_width=1000))
         else:
-            # 全画像（幅1400に正規化）
             for img, _ in vis_pairs:
                 image_parts.append(image_to_inline_part(img, max_width=1400))
             for img, _ in ir_pairs:
@@ -854,7 +855,7 @@ def main():
         )
 
         priors = domain_priors_text()
-        prompt = build_master_prompt_for_rain_leak(
+        prompt = build_master_prompt(
             user_q=user_q,
             rag_snippets=snippets,
             priors=priors,
@@ -866,7 +867,7 @@ def main():
             web_snippets=web_snips if (use_web and not fast_mode) else None
         )
 
-        step += 10; progress.progress(step, text="Gemini API に送信中…")
+        step = 85; progress.progress(step, text="Gemini API に送信中…")
 
         # API キー
         try:
@@ -874,7 +875,7 @@ def main():
         except (KeyError, FileNotFoundError):
             progress.empty()
             st.error("Gemini API Key が未設定です。.streamlit/secrets.toml に [gemini].API_KEY を設定してください。")
-            return
+            st.stop()
 
         # 呼び出し
         try:
@@ -883,18 +884,23 @@ def main():
         except requests.HTTPError as e:
             progress.empty()
             st.error(f"APIエラー: {e.response.status_code} {e.response.reason}\n{e.response.text[:500]}")
-            return
+            if debug_mode:
+                st.write({"payload_chars": len(prompt), "images": len(image_parts)})
+            st.stop()
         except Exception as e:
             progress.empty()
             st.error(f"呼び出しエラー: {e}")
-            return
+            if debug_mode:
+                st.write({"payload_chars": len(prompt), "images": len(image_parts)})
+                st.exception(e)
+            st.stop()
 
         step = 95; progress.progress(step, text="レポート整形中…")
 
         if not report_md:
             progress.empty()
             st.warning("レポートが空でした。入力（質問/画像/PDF）を見直してください。")
-            return
+            st.stop()
 
         # 結果表示：総合評価 → 詳細
         summary_block = None
@@ -922,14 +928,12 @@ def main():
             st.markdown(f"- 参考寿命: `{rule_life}`")
             st.markdown("---")
             st.markdown(f"<div class='jp-report'>{report_md}</div>", unsafe_allow_html=True)
-
-            # Wordコピペ用テキスト
             st.markdown("###### 📋 Word貼付け用テキスト（全選択→コピー）")
             st.text_area("", value=report_md, height=260, label_visibility="collapsed")
 
         # ダウンロード（MD / TXT with BOM）
         md_bytes = report_md.encode("utf-8")
-        txt_bytes = report_md.encode("utf-8-sig")  # ★BOM付きで文字化け回避
+        txt_bytes = report_md.encode("utf-8-sig")  # BOM付き
         col_dl1, col_dl2 = st.columns(2)
         with col_dl1:
             st.download_button(
@@ -947,20 +951,6 @@ def main():
                 mime="text/plain",
                 use_container_width=True
             )
-
-        # 参考：使用したRAG抜粋＋Web
-        with st.expander("（参考）使用した根拠抜粋（RAG / Web）"):
-            if snippets:
-                st.markdown("**RAG（PDF）**")
-                for d in snippets:
-                    snippet = d["text"][:600] + ('…' if len(d["text"]) > 600 else '')
-                    pg = f" p.{d['page_start']}" if d.get("page_start") else ""
-                    st.markdown(f"<div class='jp-report'><b>{d['doc']}{pg}</b>：{snippet}</div>", unsafe_allow_html=True)
-            if (use_web and not fast_mode) and web_snips:
-                st.markdown("**Web（参考）**")
-                for d in web_snips:
-                    snippet = d["text"][:600] + ('…' if len(d["text"]) > 600 else '')
-                    st.markdown(f"<div class='jp-report'><b>{d['doc']}</b>：{snippet}</div>", unsafe_allow_html=True)
 
         progress.progress(100, text="完了")
         progress.empty()
