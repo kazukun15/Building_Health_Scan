@@ -604,358 +604,494 @@ def remove_from_gallery(key: str, idx: int):
         pass
 
 # ---------------------- メイン ----------------------
+# ---------------------- メイン ----------------------
 def main():
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    # ページ設定
+    st.set_page_config(
+        page_title=APP_TITLE,
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
     inject_material_css()
     ensure_galleries()
 
+    # ===================== サイドバー：モード・サマリ =====================
+    with st.sidebar:
+        st.markdown("### 🏗️ 建物診断くん")
+        st.caption("スマホ対応 / 複数画像 × RAG × Gemini 2.5 Flash")
+
+        # グローバル設定
+        fast_mode = st.toggle(
+            "⚡ 高速モード（代表画像・低解像度・RAG縮小）",
+            value=True,
+            help="代表的な画像のみ送信し、RAGの抜粋数も減らして高速化します。Web検索は自動でOFFになります。"
+        )
+        debug_mode = st.toggle(
+            "🐞 デバッグログを表示",
+            value=False,
+            help="エラー時の詳細ログを表示します（通常はOFF推奨）。"
+        )
+        use_web = st.toggle(
+            "🌐 Web検索も併用（.go.jp / PDF 優先）",
+            value=False,
+            disabled=fast_mode,
+            help="Bing または SerpAPI の APIキーが secrets に設定されている場合のみ有効です。高速モード中はOFF固定。"
+        )
+        st.caption("※ Web検索は建築系の公的資料やPDFを優先して参照します。")
+
+        # 入力状況サマリ
+        st.markdown("---")
+        st.markdown("#### 入力状況サマリ")
+        vis_count = len(st.session_state.get("vis_gallery", []))
+        ir_count = len(st.session_state.get("ir_gallery", []))
+        st.write(f"- 可視画像: **{vis_count}枚**")
+        st.write(f"- IR画像: **{ir_count}枚**")
+
+        params = st.experimental_get_query_params()
+        lat_param = params.get("lat", [None])[0]
+        lon_param = params.get("lon", [None])[0]
+        if lat_param and lon_param:
+            loc_state = f"{float(lat_param):.5f}, {float(lon_param):.5f}"
+        else:
+            loc_state = "未取得 / 未入力"
+        st.write(f"- 位置情報: **{loc_state}**")
+
+        st.info("①〜④のタブに沿って入力し、最後に「④ 実行＆結果」タブで解析します。")
+
+    # ===================== ヘッダー（共通） =====================
     st.markdown(
         f"""
-<div class=\"app-hero jp-sans\">
-  <div class=\"app-hero-title\">🏗️ {APP_TITLE}</div>
-  <div class=\"app-hero-sub\">スマホ最適 / 複数画像（可視・赤外）× RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash</div>
+<div class="app-hero jp-sans">
+  <div class="app-hero-title">🏗️ {APP_TITLE}</div>
+  <div class="app-hero-sub">
+    スマホ最適 / 複数画像（可視・赤外）× RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash
+  </div>
 </div>
         """,
         unsafe_allow_html=True
     )
 
-    # 高速モード・デバッグ
-    col_mode1, col_mode2 = st.columns(2)
-    with col_mode1:
-        fast_mode = st.toggle("⚡ 高速モード（代表画像・低解像度・RAG縮小・Web検索OFF）", value=True)
-    with col_mode2:
-        debug_mode = st.toggle("🐞 デバッグログを表示", value=False)
+    # ===================== タブ構成 =====================
+    tab_q, tab_img, tab_loc, tab_run = st.tabs(
+        ["① 質問", "② 画像入力", "③ 位置情報", "④ 実行＆結果"]
+    )
 
-    # 1) 質問
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">1) 質問</div>', unsafe_allow_html=True)
-    user_q = st.text_input("例：外壁タイルのひび割れ基準と推定寿命、雨漏り原因特定など", "", placeholder="分析したいテーマ・質問を入力")
-    st.markdown('</div>', unsafe_allow_html=True)
+    # ---------- ① 質問 ----------
+    with tab_q:
+        st.markdown('<div class="md-card">', unsafe_allow_html=True)
+        st.markdown('<div class="md-title">1) 何を知りたいか（診断テーマ）</div>', unsafe_allow_html=True)
+        user_q = st.text_input(
+            "例：外壁タイルのひび割れ基準と推定寿命、雨漏り原因特定など",
+            "",
+            placeholder="分析したいテーマ・質問を入力してください"
+        )
+        st.caption("※ 具体的な部位・材料・症状（例：タイル浮き、ALC版の含水、屋上防水のふくれ）を書くほど精度が上がります。")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # 2) Web検索併用（任意）
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">2) RAG不足時の Web検索 併用（任意・公的サイト優先）</div>', unsafe_allow_html=True)
-    use_web = st.toggle("RAGで不足する場合は Web検索も併用（.go.jp / PDF を優先・出典URL併記）", value=False, disabled=fast_mode)
-    st.caption("Bing または SerpAPI の APIキーが secrets に設定されている場合のみ有効。高速モードでは既定でOFFです。")
-    st.markdown('</div>', unsafe_allow_html=True)
+    # ---------- ② 画像入力 ----------
+    with tab_img:
+        st.markdown('<div class="md-card">', unsafe_allow_html=True)
+        st.markdown('<div class="md-title">2) 画像入力（可視 / 赤外線：複数可）</div>', unsafe_allow_html=True)
 
-    # 3) 画像（複数・背面カメラ優先）
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">3) 画像入力（可視/赤外：複数可）</div>', unsafe_allow_html=True)
-    colA, colB = st.columns(2)
+        colA, colB = st.columns(2)
 
-    with colA:
-        st.markdown("**可視（複数）**")
-        if HAVE_BACK_CAM:
-            st.caption("📷 リアカメラで撮影 → 『可視に追加』でギャラリーへ")
-            bc_img = back_camera_input(key="vis_back")
-            if st.button("➕ 撮影画像を可視に追加", use_container_width=True):
+        # --- 可視画像 ---
+        with colA:
+            st.markdown("**可視画像（ひび割れ・仕上げ・目地など）**")
+
+            if HAVE_BACK_CAM:
+                st.caption("📷 背面カメラで撮影 → 『可視に追加』でギャラリーに登録")
+                bc_img = back_camera_input(key="vis_back")
+                if st.button("➕ 撮影画像を可視に追加", use_container_width=True):
+                    try:
+                        if bc_img is not None:
+                            if isinstance(bc_img, Image.Image):
+                                add_to_gallery(bc_img, "vis_gallery")
+                            else:
+                                add_to_gallery(Image.open(io.BytesIO(bc_img)), "vis_gallery")
+                    except Exception as e:
+                        if debug_mode:
+                            st.exception(e)
+                        st.warning("撮影画像の追加に失敗しました。")
+            else:
+                st.info("背面カメラコンポーネントが未インストールのため、標準カメラにフォールバックします。")
+
+            vis_cam = st.camera_input("カメラで撮影（フォールバック）", key="vis_cam")
+            if st.button("➕ 撮影画像を可視に追加（フォールバック）", use_container_width=True) and vis_cam is not None:
                 try:
-                    if bc_img is not None:
-                        if isinstance(bc_img, Image.Image):
-                            add_to_gallery(bc_img, "vis_gallery")
-                        else:
-                            add_to_gallery(Image.open(io.BytesIO(bc_img)), "vis_gallery")
+                    add_to_gallery(Image.open(vis_cam), "vis_gallery")
                 except Exception as e:
                     if debug_mode:
                         st.exception(e)
                     st.warning("撮影画像の追加に失敗しました。")
-        else:
-            st.info("背面カメラコンポーネントが未インストールのため、標準カメラにフォールバックします。")
 
-        vis_cam = st.camera_input("カメラで撮影（フォールバック）", key="vis_cam")
-        if st.button("➕ 撮影画像を可視に追加（フォールバック）", use_container_width=True) and vis_cam is not None:
-            try:
-                add_to_gallery(Image.open(vis_cam), "vis_gallery")
-            except Exception as e:
-                if debug_mode:
-                    st.exception(e)
-                st.warning("撮影画像の追加に失敗しました。")
+            vis_files = st.file_uploader(
+                "可視画像ファイルを選択（複数可：JPG/PNG）",
+                type=["jpg", "jpeg", "png"],
+                accept_multiple_files=True,
+                key="vis_up"
+            )
+            if vis_files and st.button("📥 選択した可視画像をすべて追加", use_container_width=True):
+                for f in vis_files:
+                    try:
+                        add_to_gallery(Image.open(f), "vis_gallery")
+                    except Exception:
+                        if debug_mode:
+                            st.warning(f"可視画像の読み込みに失敗: {getattr(f, 'name', '不明')}")
 
-        vis_files = st.file_uploader("可視画像を選択（複数可：JPG/PNG）", type=["jpg","jpeg","png"], accept_multiple_files=True, key="vis_up")
-        if vis_files and st.button("📥 選択した可視画像をすべて追加", use_container_width=True):
-            for f in vis_files:
-                try:
-                    add_to_gallery(Image.open(f), "vis_gallery")
-                except Exception:
-                    pass
+        # --- IR画像 ---
+        with colB:
+            st.markdown("**赤外線（IR）画像**")
+            ir_files = st.file_uploader(
+                "IR画像ファイルを選択（複数可：JPG/PNG）",
+                type=["jpg", "jpeg", "png"],
+                accept_multiple_files=True,
+                key="ir_up"
+            )
+            if ir_files and st.button("📥 選択したIR画像をすべて追加", use_container_width=True):
+                for f in ir_files:
+                    try:
+                        add_to_gallery(Image.open(f), "ir_gallery")
+                    except Exception:
+                        if debug_mode:
+                            st.warning(f"IR画像の読み込みに失敗: {getattr(f, 'name', '不明')}")
 
-    with colB:
-        st.markdown("**赤外線（IR）（複数）**")
-        ir_files = st.file_uploader("IR画像を選択（複数可：JPG/PNG）", type=["jpg","jpeg","png"], accept_multiple_files=True, key="ir_up")
-        if ir_files and st.button("📥 選択したIR画像をすべて追加", use_container_width=True):
-            for f in ir_files:
-                try:
-                    add_to_gallery(Image.open(f), "ir_gallery")
-                except Exception:
-                    pass
-        with st.expander("IRメタデータ（任意・精度向上）"):
-            st.session_state["ir_emiss"] = st.text_input("放射率 ε（例:0.95）", st.session_state.get("ir_emiss",""))
-            st.session_state["ir_tref"]  = st.text_input("反射温度 T_ref[℃]（例:20）", st.session_state.get("ir_tref",""))
-            st.session_state["ir_tamb"]  = st.text_input("外気温 T_amb[℃]（例:22）", st.session_state.get("ir_tamb",""))
-            st.session_state["ir_rh"]    = st.text_input("相対湿度 RH[%]（例:65）", st.session_state.get("ir_rh",""))
-            st.session_state["ir_dist"]  = st.text_input("撮影距離[m]（例:5）", st.session_state.get("ir_dist",""))
-            st.session_state["ir_ang"]   = st.text_input("撮影角度[°]（例:10）", st.session_state.get("ir_ang",""))
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # ギャラリー（削除ボタン付）
-    if st.session_state["vis_gallery"] or st.session_state["ir_gallery"]:
-        st.markdown('<div class="md-card">', unsafe_allow_html=True)
-        st.markdown('<div class="md-title">画像ギャラリー（上限8枚／古い順に入替）</div>', unsafe_allow_html=True)
-
-        if st.session_state["vis_gallery"]:
-            st.markdown("**可視**")
-            cols = st.columns(4)
-            for i, img in enumerate(st.session_state["vis_gallery"]):
-                with cols[i % 4]:
-                    st.image(img, use_container_width=True)
-                    if st.button(f"🗑️ 削除 可視 {i+1}", key=f"del_vis_{i}", use_container_width=True):
-                        remove_from_gallery("vis_gallery", i)
-                        st.experimental_rerun()
-
-        if st.session_state["ir_gallery"]:
-            st.markdown("**IR**")
-            cols2 = st.columns(4)
-            for j, img in enumerate(st.session_state["ir_gallery"]):
-                with cols2[j % 4]:
-                    st.image(img, use_container_width=True)
-                    if st.button(f"🗑️ 削除 IR {j+1}", key=f"del_ir_{j}", use_container_width=True):
-                        remove_from_gallery("ir_gallery", j)
-                        st.experimental_rerun()
+            with st.expander("IRメタデータ（任意：精度向上）"):
+                st.session_state["ir_emiss"] = st.text_input(
+                    "放射率 ε（例:0.95）",
+                    st.session_state.get("ir_emiss", "")
+                )
+                st.session_state["ir_tref"] = st.text_input(
+                    "反射温度 T_ref[℃]（例:20）",
+                    st.session_state.get("ir_tref", "")
+                )
+                st.session_state["ir_tamb"] = st.text_input(
+                    "外気温 T_amb[℃]（例:22）",
+                    st.session_state.get("ir_tamb", "")
+                )
+                st.session_state["ir_rh"] = st.text_input(
+                    "相対湿度 RH[%]（例:65）",
+                    st.session_state.get("ir_rh", "")
+                )
+                st.session_state["ir_dist"] = st.text_input(
+                    "撮影距離[m]（例:5）",
+                    st.session_state.get("ir_dist", "")
+                )
+                st.session_state["ir_ang"] = st.text_input(
+                    "撮影角度[°]（例:10）",
+                    st.session_state.get("ir_ang", "")
+                )
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # 4) 位置（ボタン式 geolocation）
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">4) 位置情報（現在地 or 手入力）</div>', unsafe_allow_html=True)
+        # --- ギャラリー表示（削除ボタン付き） ---
+        if st.session_state["vis_gallery"] or st.session_state["ir_gallery"]:
+            st.markdown('<div class="md-card">', unsafe_allow_html=True)
+            st.markdown('<div class="md-title">画像ギャラリー（上限8枚／古い順に入替）</div>', unsafe_allow_html=True)
 
-    lat_val, lon_val = geolocate_with_button()
+            if st.session_state["vis_gallery"]:
+                st.markdown("**可視**")
+                cols = st.columns(4)
+                for i, img in enumerate(st.session_state["vis_gallery"]):
+                    with cols[i % 4]:
+                        st.image(img, use_container_width=True)
+                        if st.button(f"🗑️ 削除 可視 {i+1}", key=f"del_vis_{i}", use_container_width=True):
+                            remove_from_gallery("vis_gallery", i)
+                            st.experimental_rerun()
 
-    c1, c2, c3 = st.columns([1,1,2])
-    with c1:
-        lat_str = "" if lat_val is None else f"{lat_val:.6f}"
-        lat_str = st.text_input("緯度", value=lat_str, key="lat_manual")
-    with c2:
-        lon_str = "" if lon_val is None else f"{lon_val:.6f}"
-        lon_str = st.text_input("経度", value=lon_str, key="lon_manual")
-    with c3:
-        st.caption("※ 『現在地を取得』で許可が必要です。取得できない場合は手入力してください。")
+            if st.session_state["ir_gallery"]:
+                st.markdown("**IR**")
+                cols2 = st.columns(4)
+                for j, img in enumerate(st.session_state["ir_gallery"]):
+                    with cols2[j % 4]:
+                        st.image(img, use_container_width=True)
+                        if st.button(f"🗑️ 削除 IR {j+1}", key=f"del_ir_{j}", use_container_width=True):
+                            remove_from_gallery("ir_gallery", j)
+                            st.experimental_rerun()
 
-    try:
-        lat_f = float(lat_str) if lat_str else None
-        lon_f = float(lon_str) if lon_str else None
-    except Exception:
-        lat_f, lon_f = None, None
-
-    if lat_f is not None and lon_f is not None:
-        m = folium.Map(location=[lat_f, lon_f], zoom_start=18, tiles="OpenStreetMap")
-        folium.Marker([lat_f, lon_f], tooltip="対象地点").add_to(m)
-        st_folium(m, height=300, use_container_width=True)
-
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    # 5) 実行
-    st.markdown('<div class="md-card">', unsafe_allow_html=True)
-    st.markdown('<div class="md-title">5) 解析の実行</div>', unsafe_allow_html=True)
-    run = st.button("🔎 解析する", use_container_width=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-    if run:
-        # 先にバリデーション（ここで止まるときは明示表示）
-        problems = []
-        if not user_q:
-            problems.append("質問を入力してください。")
-        if not (st.session_state["vis_gallery"] or st.session_state["ir_gallery"]):
-            problems.append("少なくとも1枚の画像（可視またはIR）を追加してください。")
-        if problems:
-            st.error("\n".join(f"• {p}" for p in problems))
-            if debug_mode:
-                st.write({"debug": "validation_failed", "problems": problems})
-            st.stop()
-
-        # 進捗バー開始
-        progress = st.progress(0, text="RAG準備中…")
-        step = 10
-        progress.progress(step)
-
-        # RAG（高速モードでは上位Kを縮小）
-        try:
-            k_snip = 4 if fast_mode else MAX_SNIPPETS
-            snippets = rag_search(user_q, have_ir=bool(st.session_state["ir_gallery"]), k=k_snip)
-        except Exception as e:
-            progress.empty()
-            st.error("RAG 準備に失敗しました。PDFの配置や権限を確認してください。")
-            if debug_mode:
-                st.exception(e)
-            st.stop()
-
-        step = 35; progress.progress(step, text="画像所見の集約中…")
-
-        # 画像所見（高速モードでは低解像度統計）
-        vis_target_w = 128 if fast_mode else 256
-        ir_target_w = 128 if fast_mode else 256
-        try:
-            vis_pairs = [(img, analyze_visual(img, target_w=vis_target_w)) for img in st.session_state["vis_gallery"]]
-            ir_pairs  = [(img, analyze_ir(img, {
-                "emissivity": (st.session_state.get('ir_emiss') or "不明").strip(),
-                "t_ref": (st.session_state.get('ir_tref') or "不明").strip(),
-                "t_amb": (st.session_state.get('ir_tamb') or "不明").strip(),
-                "rh": (st.session_state.get('ir_rh') or "不明").strip(),
-                "dist": (st.session_state.get('ir_dist') or "不明").strip(),
-                "angle": (st.session_state.get('ir_ang') or "不明").strip(),
-            }, target_w=ir_target_w)) for img in st.session_state["ir_gallery"]]
-        except Exception as e:
-            progress.empty()
-            st.error("画像処理でエラーが発生しました。画像形式・サイズをご確認ください。")
-            if debug_mode:
-                st.exception(e)
-            st.stop()
-
-        vis_list = [v for (_, v) in vis_pairs]
-        ir_list  = [i for (_, i) in ir_pairs]
-        step = 55; progress.progress(step, text="暫定評価を計算中…")
-
-        # 暫定評価
-        rule_grade, rule_reason = rule_based_grade(vis_list, ir_list)
-        rule_life = rule_based_life(rule_grade)
-
-        # Web検索（任意）
-        step = 65; progress.progress(step, text="Web検索（任意）を実行中…")
-        web_snips: List[Dict[str, Any]] = []
-        if use_web and not fast_mode:
-            try:
-                web_snips = web_search_snippets_cached(user_q, max_items=3)
-            except Exception as e:
-                if debug_mode:
-                    st.exception(e)
-
-        step = 75; progress.progress(step, text="プロンプトを作成中…")
-
-        # 画像送信の選抜（高速モード：可視上位2 + IR上位1）
-        image_parts: List[Dict[str, Any]] = []
-        if fast_mode:
-            if vis_pairs:
-                vis_sorted = sorted(vis_pairs, key=lambda p: p[1]['metrics']['edge_ratio'], reverse=True)
-                for img, _ in vis_sorted[:2]:
-                    image_parts.append(image_to_inline_part(img, max_width=1000))
-            if ir_pairs:
-                ir_sorted = sorted(ir_pairs, key=lambda p: p[1]['delta_rel'], reverse=True)
-                for img, _ in ir_sorted[:1]:
-                    image_parts.append(image_to_inline_part(img, max_width=1000))
-        else:
-            for img, _ in vis_pairs:
-                image_parts.append(image_to_inline_part(img, max_width=1400))
-            for img, _ in ir_pairs:
-                image_parts.append(image_to_inline_part(img, max_width=1400))
-
-        ir_meta_note = (
-            "注: 赤外線画像はJPEG相対評価。放射率/反射温度/外気温/湿度/距離/角度/風/日射等に影響され、"
-            "絶対温度は扱わない。雨直後・散水直後・非日射時間帯での再撮影が有効。"
-        )
-
-        priors = domain_priors_text()
-        prompt = build_master_prompt(
-            user_q=user_q,
-            rag_snippets=snippets,
-            priors=priors,
-            vis_list=vis_list,
-            ir_list=ir_list,
-            rule_grade=rule_grade,
-            rule_life=rule_life,
-            ir_meta_note=ir_meta_note,
-            web_snippets=web_snips if (use_web and not fast_mode) else None
-        )
-
-        step = 85; progress.progress(step, text="Gemini API に送信中…")
-
-        # API キー
-        try:
-            api_key = st.secrets["gemini"]["API_KEY"]
-        except (KeyError, FileNotFoundError):
-            progress.empty()
-            st.error("Gemini API Key が未設定です。.streamlit/secrets.toml に [gemini].API_KEY を設定してください。")
-            st.stop()
-
-        # 呼び出し
-        try:
-            result = call_gemini(api_key, prompt, image_parts)
-            report_md = extract_text_from_gemini(result)
-        except requests.HTTPError as e:
-            progress.empty()
-            st.error(f"APIエラー: {e.response.status_code} {e.response.reason}\n{e.response.text[:500]}")
-            if debug_mode:
-                st.write({"payload_chars": len(prompt), "images": len(image_parts)})
-            st.stop()
-        except Exception as e:
-            progress.empty()
-            st.error(f"呼び出しエラー: {e}")
-            if debug_mode:
-                st.write({"payload_chars": len(prompt), "images": len(image_parts)})
-                st.exception(e)
-            st.stop()
-
-        step = 95; progress.progress(step, text="レポート整形中…")
-
-        if not report_md:
-            progress.empty()
-            st.warning("レポートが空でした。入力（質問/画像/PDF）を見直してください。")
-            st.stop()
-
-        # 結果表示：総合評価 → 詳細
-        summary_block = None
-        try:
-            pattern = r"(?:^|\n)##?\s*総合評価[\s\S]*?(?=\n##?\s|\Z)"
-            m = re.search(pattern, report_md, re.IGNORECASE)
-            if m:
-                summary_block = m.group(0)
-        except Exception:
-            summary_block = None
-
-        st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
-        st.markdown('<div class="md-title">6) 解析結果</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-        if summary_block:
-            st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
-            st.markdown('<div class="md-title">🧭 総合評価（先頭要約）</div>', unsafe_allow_html=True)
-            st.markdown(f"<div class='jp-report'>{summary_block}</div>", unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-        with st.expander("詳細レポートを表示（Word貼付け可）", expanded=(summary_block is None)):
-            st.markdown("**（参考）画像＋一般原則による暫定評価**")
-            st.markdown(f"- 暫定グレード: `{rule_grade}`（{rule_reason}）")
-            st.markdown(f"- 参考寿命: `{rule_life}`")
-            st.markdown("---")
-            st.markdown(f"<div class='jp-report'>{report_md}</div>", unsafe_allow_html=True)
-            st.markdown("###### 📋 Word貼付け用テキスト（全選択→コピー）")
-            st.text_area("", value=report_md, height=260, label_visibility="collapsed")
+    # ---------- ③ 位置情報 ----------
+    with tab_loc:
+        st.markdown('<div class="md-card">', unsafe_allow_html=True)
+        st.markdown('<div class="md-title">3) 位置情報（現在地 or 手入力）</div>', unsafe_allow_html=True)
 
-        # ダウンロード（MD / TXT with BOM）
-        md_bytes = report_md.encode("utf-8")
-        txt_bytes = report_md.encode("utf-8-sig")  # BOM付き
-        col_dl1, col_dl2 = st.columns(2)
-        with col_dl1:
-            st.download_button(
-                "📄 レポートをダウンロード（Markdown）",
-                md_bytes,
-                file_name="building_health_report.md",
-                mime="text/markdown",
-                use_container_width=True
+        lat_val, lon_val = geolocate_with_button("📍 現在地を取得（ブラウザの許可が必要）")
+
+        c1, c2, c3 = st.columns([1, 1, 2])
+        with c1:
+            lat_str = "" if lat_val is None else f"{lat_val:.6f}"
+            lat_str = st.text_input("緯度", value=lat_str, key="lat_manual")
+        with c2:
+            lon_str = "" if lon_val is None else f"{lon_val:.6f}"
+            lon_str = st.text_input("経度", value=lon_str, key="lon_manual")
+        with c3:
+            st.caption("※ 現在地が取得できない場合は、地理院地図等で緯度経度を調べて手入力してください。")
+
+        try:
+            lat_f = float(lat_str) if lat_str else None
+            lon_f = float(lon_str) if lon_str else None
+        except Exception:
+            lat_f, lon_f = None, None
+            if lat_str or lon_str:
+                st.warning("緯度・経度は数値で入力してください。")
+
+        if lat_f is not None and lon_f is not None:
+            m = folium.Map(location=[lat_f, lon_f], zoom_start=18, tiles="OpenStreetMap")
+            folium.Marker([lat_f, lon_f], tooltip="対象地点").add_to(m)
+            st_folium(m, height=300, use_container_width=True)
+
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ---------- ④ 実行＆結果 ----------
+    with tab_run:
+        st.markdown('<div class="md-card">', unsafe_allow_html=True)
+        st.markdown('<div class="md-title">4) 解析の実行</div>', unsafe_allow_html=True)
+
+        st.markdown(
+            "- 入力内容を確認してから、下のボタンを押してください。\n"
+            "- 高速モード：代表画像のみ＋RAG縮小でレスポンス重視\n"
+            "- 通常モード：全画像＋RAG最大、必要に応じてWeb検索も併用"
+        )
+
+        run = st.button("🔎 解析する", use_container_width=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # ===== 実行フロー =====
+        if run:
+            # 1) バリデーション
+            problems = []
+            if not user_q:
+                problems.append("質問を入力してください。")
+            if not (st.session_state["vis_gallery"] or st.session_state["ir_gallery"]):
+                problems.append("少なくとも1枚の画像（可視またはIR）を追加してください。")
+            if problems:
+                st.error("\n".join(f"• {p}" for p in problems))
+                if debug_mode:
+                    st.write({"debug": "validation_failed", "problems": problems})
+                st.stop()
+
+            # 2) 進捗バー開始
+            progress = st.progress(0, text="RAG準備中…")
+            step = 10
+            progress.progress(step)
+
+            # 3) RAG 検索
+            try:
+                k_snip = 4 if fast_mode else MAX_SNIPPETS
+                snippets = rag_search(
+                    user_q,
+                    have_ir=bool(st.session_state["ir_gallery"]),
+                    k=k_snip
+                )
+            except Exception as e:
+                progress.empty()
+                st.error("RAG 準備に失敗しました。PDFの配置や権限を確認してください。")
+                if debug_mode:
+                    st.exception(e)
+                st.stop()
+
+            step = 35
+            progress.progress(step, text="画像所見の集約中…")
+
+            # 4) 画像所見
+            vis_target_w = 128 if fast_mode else 256
+            ir_target_w = 128 if fast_mode else 256
+            try:
+                vis_pairs = [
+                    (img, analyze_visual(img, target_w=vis_target_w))
+                    for img in st.session_state["vis_gallery"]
+                ]
+                ir_pairs = [
+                    (
+                        img,
+                        analyze_ir(
+                            img,
+                            {
+                                "emissivity": (st.session_state.get("ir_emiss") or "不明").strip(),
+                                "t_ref": (st.session_state.get("ir_tref") or "不明").strip(),
+                                "t_amb": (st.session_state.get("ir_tamb") or "不明").strip(),
+                                "rh": (st.session_state.get("ir_rh") or "不明").strip(),
+                                "dist": (st.session_state.get("ir_dist") or "不明").strip(),
+                                "angle": (st.session_state.get("ir_ang") or "不明").strip(),
+                            },
+                            target_w=ir_target_w
+                        )
+                    )
+                    for img in st.session_state["ir_gallery"]
+                ]
+            except Exception as e:
+                progress.empty()
+                st.error("画像処理でエラーが発生しました。画像形式・サイズをご確認ください。")
+                if debug_mode:
+                    st.exception(e)
+                st.stop()
+
+            vis_list = [v for (_, v) in vis_pairs]
+            ir_list = [i for (_, i) in ir_pairs]
+
+            step = 55
+            progress.progress(step, text="暫定評価を計算中…")
+
+            # 5) 暫定評価（ルールベース）
+            rule_grade, rule_reason = rule_based_grade(vis_list, ir_list)
+            rule_life = rule_based_life(rule_grade)
+
+            # 6) Web検索（任意）
+            step = 65
+            progress.progress(step, text="Web検索（任意）を実行中…")
+            web_snips: List[Dict[str, Any]] = []
+            if use_web and not fast_mode:
+                try:
+                    web_snips = web_search_snippets_cached(user_q, max_items=3)
+                except Exception as e:
+                    if debug_mode:
+                        st.exception(e)
+
+            step = 75
+            progress.progress(step, text="プロンプトを作成中…")
+
+            # 7) Gemini に送る画像選抜
+            image_parts: List[Dict[str, Any]] = []
+            if fast_mode:
+                # 可視: エッジ密度が高い順に上位2枚
+                if vis_pairs:
+                    vis_sorted = sorted(
+                        vis_pairs,
+                        key=lambda p: p[1]["metrics"]["edge_ratio"],
+                        reverse=True
+                    )
+                    for img, _ in vis_sorted[:2]:
+                        image_parts.append(image_to_inline_part(img, max_width=1000))
+                # IR: Δ相対が大きいものを1枚
+                if ir_pairs:
+                    ir_sorted = sorted(
+                        ir_pairs,
+                        key=lambda p: p[1]["delta_rel"],
+                        reverse=True
+                    )
+                    for img, _ in ir_sorted[:1]:
+                        image_parts.append(image_to_inline_part(img, max_width=1000))
+            else:
+                # 通常モード: 全画像送信
+                for img, _ in vis_pairs:
+                    image_parts.append(image_to_inline_part(img, max_width=1400))
+                for img, _ in ir_pairs:
+                    image_parts.append(image_to_inline_part(img, max_width=1400))
+
+            ir_meta_note = (
+                "注: 赤外線画像はJPEG相対評価。放射率/反射温度/外気温/湿度/距離/角度/風/日射等に強く影響し、"
+                "絶対温度としては扱いません。雨直後・散水直後・非日射時間帯での再撮影が有効です。"
             )
-        with col_dl2:
-            st.download_button(
-                "📄 レポートをダウンロード（TXT／Word向け・BOM付）",
-                txt_bytes,
-                file_name="building_health_report.txt",
-                mime="text/plain",
-                use_container_width=True
+
+            priors = domain_priors_text()
+            prompt = build_master_prompt(
+                user_q=user_q,
+                rag_snippets=snippets,
+                priors=priors,
+                vis_list=vis_list,
+                ir_list=ir_list,
+                rule_grade=rule_grade,
+                rule_life=rule_life,
+                ir_meta_note=ir_meta_note,
+                web_snippets=web_snips if (use_web and not fast_mode) else None
             )
 
-        progress.progress(100, text="完了")
-        progress.empty()
+            step = 85
+            progress.progress(step, text="Gemini API に送信中…")
 
+            # 8) Gemini API キー取得
+            try:
+                api_key = st.secrets["gemini"]["API_KEY"]
+            except (KeyError, FileNotFoundError):
+                progress.empty()
+                st.error("Gemini API Key が未設定です。.streamlit/secrets.toml に [gemini].API_KEY を設定してください。")
+                st.stop()
+
+            # 9) Gemini 呼び出し
+            try:
+                result = call_gemini(api_key, prompt, image_parts)
+                report_md = extract_text_from_gemini(result)
+            except requests.HTTPError as e:
+                progress.empty()
+                st.error(f"APIエラー: {e.response.status_code} {e.response.reason}\n{e.response.text[:500]}")
+                if debug_mode:
+                    st.write({"payload_chars": len(prompt), "images": len(image_parts)})
+                st.stop()
+            except Exception as e:
+                progress.empty()
+                st.error(f"呼び出しエラー: {e}")
+                if debug_mode:
+                    st.write({"payload_chars": len(prompt), "images": len(image_parts)})
+                    st.exception(e)
+                st.stop()
+
+            step = 95
+            progress.progress(step, text="レポート整形中…")
+
+            if not report_md:
+                progress.empty()
+                st.warning("レポートが空でした。入力（質問/画像/PDF）を見直してください。")
+                st.stop()
+
+            # 10) 結果表示（総合評価＋詳細）
+            summary_block = None
+            try:
+                pattern = r"(?:^|\n)##?\s*総合評価[^\n]*[\s\S]*?(?=\n##?\s|\Z)"
+                m = re.search(pattern, report_md, re.IGNORECASE)
+                if m:
+                    summary_block = m.group(0)
+            except Exception:
+                summary_block = None
+
+            # 総合評価カード
+            st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
+            st.markdown('<div class="md-title">解析結果（総合評価）</div>', unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if summary_block:
+                st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
+                st.markdown('<div class="md-title">🧭 総合評価（先頭要約）</div>', unsafe_allow_html=True)
+                st.markdown(f"<div class='jp-report'>{summary_block}</div>", unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            # 詳細レポート
+            with st.expander("詳細レポートを表示（Word貼付け用）", expanded=(summary_block is None)):
+                st.markdown("**（参考）画像＋一般原則による暫定評価**")
+                st.markdown(f"- 暫定グレード: `{rule_grade}`（{rule_reason}）")
+                st.markdown(f"- 参考寿命: `{rule_life}`")
+                st.markdown("---")
+                st.markdown(f"<div class='jp-report'>{report_md}</div>", unsafe_allow_html=True)
+                st.markdown("###### 📋 Word貼付け用テキスト（全選択→コピー）")
+                st.text_area("", value=report_md, height=260, label_visibility="collapsed")
+
+            # 11) ダウンロード（MD / TXT）
+            md_bytes = report_md.encode("utf-8")
+            txt_bytes = report_md.encode("utf-8-sig")  # BOM付き
+            col_dl1, col_dl2 = st.columns(2)
+            with col_dl1:
+                st.download_button(
+                    "📄 レポートをダウンロード（Markdown）",
+                    md_bytes,
+                    file_name="building_health_report.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+            with col_dl2:
+                st.download_button(
+                    "📄 レポートをダウンロード（TXT／Word向け・BOM付）",
+                    txt_bytes,
+                    file_name="building_health_report.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+
+            progress.progress(100, text="完了")
+            progress.empty()
+
+    # フッタ
     st.caption("© 建物診断くん — 複数画像 × RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash。")
+
 
 if __name__ == "__main__":
     main()
