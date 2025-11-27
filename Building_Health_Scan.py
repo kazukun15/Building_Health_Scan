@@ -1,14 +1,10 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
 # 建物診断くん（不具合修正版 / スマホ対応 / マテリアルUI / 複数画像 / RAG / Gemini 2.5 Flash）
-# - 重大修正1: 「解析する」を押す→検証エラーで止まる問題
-#     → バリデーションを先に実行し、問題点を一覧表示。合格時のみ進捗バーを開始。
-# - 重大修正2: 現在地が取得できない問題
-#     → 明示ボタン付きのJSコンポーネント（user-gesture起点）で geolocation を呼び出し、
-#        取得座標を URL クエリへ反映→同タブでソフトリロードする方式に変更。
-#        iOS/一部ブラウザの自動実行制限を回避。
-# - 追加: 詳細ログ（デバッグモード）とタイムアウト強化、早期リターン時の進捗 UI を即時消去。
-# - 既存機能は維持（複数画像/IRメタ/地図/高速モード/RAG/Web併用/ダウンロード等）。
+# - バリデーションを先に実行し、問題点を一覧表示。合格時のみ進捗バーを開始。
+# - 位置情報取得：ボタン起点の geolocation ＋ URL クエリ反映方式。
+# - 503 対応：Gemini 2.5 Flash の過負荷時に自動リトライ＋分かりやすいメッセージ。
+# - UI 改良：サイドバーに設定・サマリ、メインはタブ構成（①質問〜④実行）。
 # ===========================================================
 
 # Python 3.12: pkgutil.ImpImporter 削除対策（古い依存向け）
@@ -23,7 +19,7 @@ import math
 import base64
 import statistics
 import unicodedata
-import time  # ★ 追加
+import time  # ★ 503 リトライ用
 from datetime import date
 from typing import List, Tuple, Dict, Optional, Any
 
@@ -464,7 +460,7 @@ def call_gemini(
 
             # 503（過負荷）のときだけリトライ
             if status == 503 and attempt < max_retries:
-                wait_sec = 3 * attempt  # 3秒, 6秒, 9秒... のように少しずつ延ばす
+                wait_sec = 3 * attempt  # 3秒, 6秒, 9秒...
                 try:
                     st.toast(
                         f"Gemini が一時的に過負荷のため再試行します "
@@ -472,25 +468,30 @@ def call_gemini(
                         icon="⚠️",
                     )
                 except Exception:
-                    # toast が使えない環境でもアプリが止まらないように握りつぶす
                     pass
                 time.sleep(wait_sec)
                 last_err = e
                 continue
 
-            # それ以外の HTTP エラー、またはリトライ尽きたらそのまま投げる
             last_err = e
             break
         except Exception as e:
-            # 通信系などの別の例外もそのまま外側で処理
             last_err = e
             break
 
-    # ここまで来たらすべて失敗
     if isinstance(last_err, Exception):
         raise last_err
     raise RuntimeError("Gemini 呼び出しに失敗しました（未知のエラー）。")
 
+def extract_text_from_gemini(result: Dict) -> str:
+    """
+    Gemini API のレスポンス JSON から本文テキストだけを取り出す。
+    フォーマットが想定と違ってもアプリが落ちないように安全側にする。
+    """
+    try:
+        return result["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return ""
 
 # ---------------------- プロンプト（出典必須・強制） ----------------------
 def build_master_prompt(user_q: str,
@@ -559,9 +560,9 @@ def build_master_prompt(user_q: str,
 def inject_material_css():
     components.html(
         """
-<link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin>
-<link href=\"https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap\" rel=\"stylesheet\">
-<style id=\"app-style\">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style id="app-style">
 :root{--mdc-primary:#2962ff;--mdc-secondary:#00b8d4;--mdc-bg:#f7f9fc;--mdc-surface:#ffffff;--mdc-outline:rgba(0,0,0,.08);--radius:16px;--shadow:0 6px 18px rgba(0,0,0,.08);--tap-min:44px}
 @media (prefers-color-scheme: dark){:root{--mdc-bg:#0f1115;--mdc-surface:#171a21;--mdc-outline:rgba(255,255,255,.08)}}
 .block-container{padding-top:2.2rem!important;padding-bottom:2rem}
@@ -589,7 +590,6 @@ def geolocate_with_button(label: str = "📍 現在地を取得") -> Tuple[Optio
     lat_res = float(lat) if lat else None
     lon_res = float(lon) if lon else None
 
-    # ボタン押下時、JSで取得→URL書き換え→ソフトリロード
     clicked = st.button(label, use_container_width=True)
     if clicked:
         components.html(
@@ -603,7 +603,6 @@ def geolocate_with_button(label: str = "📍 現在地を取得") -> Tuple[Optio
     if (window.top === window){
       window.location.replace(url.toString());
     }else{
-      // iframe内でも同一オリジンなら遷移
       window.location.href = url.toString();
     }
   }
@@ -648,7 +647,6 @@ def remove_from_gallery(key: str, idx: int):
     except Exception:
         pass
 
-# ---------------------- メイン ----------------------
 # ---------------------- メイン ----------------------
 def main():
     # ページ設定
@@ -902,7 +900,6 @@ def main():
         run = st.button("🔎 解析する", use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-        # ===== 実行フロー =====
         if run:
             # 1) バリデーション
             problems = []
@@ -999,7 +996,6 @@ def main():
             # 7) Gemini に送る画像選抜
             image_parts: List[Dict[str, Any]] = []
             if fast_mode:
-                # 可視: エッジ密度が高い順に上位2枚
                 if vis_pairs:
                     vis_sorted = sorted(
                         vis_pairs,
@@ -1008,7 +1004,6 @@ def main():
                     )
                     for img, _ in vis_sorted[:2]:
                         image_parts.append(image_to_inline_part(img, max_width=1000))
-                # IR: Δ相対が大きいものを1枚
                 if ir_pairs:
                     ir_sorted = sorted(
                         ir_pairs,
@@ -1018,7 +1013,6 @@ def main():
                     for img, _ in ir_sorted[:1]:
                         image_parts.append(image_to_inline_part(img, max_width=1000))
             else:
-                # 通常モード: 全画像送信
                 for img, _ in vis_pairs:
                     image_parts.append(image_to_inline_part(img, max_width=1400))
                 for img, _ in ir_pairs:
@@ -1059,9 +1053,26 @@ def main():
                 report_md = extract_text_from_gemini(result)
             except requests.HTTPError as e:
                 progress.empty()
-                st.error(f"APIエラー: {e.response.status_code} {e.response.reason}\n{e.response.text[:500]}")
+                status = e.response.status_code if e.response is not None else None
+
+                if status == 503:
+                    st.error(
+                        "Gemini 側で過負荷（503 Service Unavailable）が発生し、"
+                        "複数回の再試行でも応答が得られませんでした。\n\n"
+                        "- しばらく時間をおいて再度実行する\n"
+                        "- 画像枚数や質問内容を少し減らして再度試す\n"
+                        "などの方法も検討してください。"
+                    )
+                else:
+                    st.error(
+                        f"APIエラー: {status} "
+                        f"{getattr(e.response, 'reason', '')}\n"
+                        f"{getattr(e.response, 'text', '')[:500]}"
+                    )
+
                 if debug_mode:
                     st.write({"payload_chars": len(prompt), "images": len(image_parts)})
+                    st.exception(e)
                 st.stop()
             except Exception as e:
                 progress.empty()
@@ -1089,7 +1100,6 @@ def main():
             except Exception:
                 summary_block = None
 
-            # 総合評価カード
             st.markdown('<div class="md-card good-shadow jp-report">', unsafe_allow_html=True)
             st.markdown('<div class="md-title">解析結果（総合評価）</div>', unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)
@@ -1112,7 +1122,7 @@ def main():
 
             # 11) ダウンロード（MD / TXT）
             md_bytes = report_md.encode("utf-8")
-            txt_bytes = report_md.encode("utf-8-sig")  # BOM付き
+            txt_bytes = report_md.encode("utf-8-sig")
             col_dl1, col_dl2 = st.columns(2)
             with col_dl1:
                 st.download_button(
@@ -1134,11 +1144,8 @@ def main():
             progress.progress(100, text="完了")
             progress.empty()
 
-    # フッタ
     st.caption("© 建物診断くん — 複数画像 × RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash。")
 
 
 if __name__ == "__main__":
     main()
-
-
