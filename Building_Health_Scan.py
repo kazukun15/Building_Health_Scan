@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 # ===========================================================
-# 建物診断くん（不具合修正版 / スマホ対応 / マテリアルUI / 複数画像 / RAG / Gemini 2.5 Flash）
-# - バリデーションを先に実行し、問題点を一覧表示。合格時のみ進捗バーを開始。
-# - 位置情報取得：ボタン起点の geolocation ＋ URL クエリ反映方式。
-# - 503 対応：Gemini 2.5 Flash の過負荷時に自動リトライ＋分かりやすいメッセージ。
-# - UI 改良：サイドバーに設定・サマリ、メインはタブ構成（①質問〜④実行）。
+# 建物診断くん（RAG強化版 / スマホ対応 / マテリアルUI / 複数画像 / Gemini 2.5 Flash）
+# - RAG強化:
+#     * PDFチャンクに doc_type（基準/計画/その他）、materials、defects を付与
+#     * 質問に含まれる材料・劣化・用途に応じて BM25 スコアをブースト
+#     * プロンプトで「基準」「計画」「その他」「Web」にグルーピングし、R1,R2,...ID付与
 # ===========================================================
 
 # Python 3.12: pkgutil.ImpImporter 削除対策（古い依存向け）
@@ -19,9 +19,9 @@ import math
 import base64
 import statistics
 import unicodedata
-import time  # ★ 503 リトライ用
+import time
 from datetime import date
-from typing import List, Tuple, Dict, Optional, Any
+from typing import List, Tuple, Dict, Optional, Any, Set
 
 import streamlit as st
 import requests
@@ -48,6 +48,13 @@ PDF_SOURCES = [
     ("港区 公共施設マネジメント計画", "minatoku_Public_facility_management_plan.pdf"),
 ]
 
+# PDFファイルごとの「用途」タグ
+DOC_TYPES = {
+    "Structure_Base.pdf": "基準",
+    "kamijimachou_Public_facility_management_plan.pdf": "計画",
+    "minatoku_Public_facility_management_plan.pdf": "計画",
+}
+
 MAX_SNIPPETS = 8
 MAX_SNIPPET_CHARS = 1000
 MAX_IMAGES_TOTAL = 8  # 可視+IR 合計
@@ -64,6 +71,21 @@ QUERY_SYNONYMS = {
     "コンクリート": ["コンクリート", "RC", "中性化"],
     "防水": ["防水", "塗膜", "シーリング", "伸縮目地"],
     "劣化度": ["劣化度", "グレード", "区分", "A", "B", "C", "D"],
+}
+
+# 材料・劣化のキーワード（RAG強化用）
+MATERIAL_KEYWORDS: Dict[str, List[str]] = {
+    "タイル": ["タイル", "磁器質タイル", "モザイクタイル"],
+    "ALC": ["ALC", "軽量気泡コンクリート"],
+    "コンクリート": ["コンクリート", "RC", "鉄筋コンクリート"],
+    "防水": ["防水", "シート防水", "塗膜防水", "ウレタン防水", "アスファルト防水"],
+}
+
+DEFECT_KEYWORDS: Dict[str, List[str]] = {
+    "ひび割れ": ["ひび割れ", "クラック", "亀裂"],
+    "浮き": ["浮き", "うき"],
+    "剥離": ["剥離", "はく離", "はくり"],
+    "漏水": ["漏水", "雨漏り", "浸水", "水漏れ"],
 }
 
 # -------------------------- テキスト処理 --------------------------
@@ -94,6 +116,8 @@ def extract_chunks_from_pdf(pdf_path: str, title: str,
     if not os.path.exists(pdf_path):
         return []
     chunks: List[Dict[str, Any]] = []
+    base = os.path.basename(pdf_path)
+    doc_type = DOC_TYPES.get(base, "その他")
     try:
         with open(pdf_path, "rb") as f:
             reader = PyPDF2.PdfReader(f)
@@ -113,13 +137,15 @@ def extract_chunks_from_pdf(pdf_path: str, title: str,
                             "text": ch,
                             "page_start": i,
                             "page_end": i,
+                            "doc_type": doc_type,
                         })
                     pos = end - overlap if (end - overlap) > pos else end
     except Exception as e:
         chunks.append({
             "doc": title, "path": pdf_path,
             "text": f"[PDF読込エラー:{pdf_path}:{e}]",
-            "page_start": None, "page_end": None
+            "page_start": None, "page_end": None,
+            "doc_type": doc_type,
         })
     return chunks
 
@@ -183,45 +209,131 @@ class BM25Index:
 
 @st.cache_resource(show_spinner=False)
 def build_rag() -> Dict[str, Any]:
+    """
+    PDF からチャンクを抽出し、doc_type / materials / defects / 数値有無 / IR関連などの
+    フラグを付与したうえで BM25 インデックスを構築。
+    """
     all_chunks: List[Dict[str, Any]] = []
     for title, path in PDF_SOURCES:
         all_chunks.extend(extract_chunks_from_pdf(path, title))
+
     for d in all_chunks:
         txt = d["text"]
+        # 数値（mm, %, ℃など）を含むチャンクか
         d["_has_numbers"] = bool(re.search(r"\b\d+(\.\d+)?\s*(mm|㎜|％|%|℃)\b", txt))
-        d["_has_ir"] = any(k in txt for k in ["赤外線", "サーモ", "IR", "熱画像", "放射率", "反射温度"])
+        # IR関連キーワードを含むか
+        d["_has_ir"] = any(k in txt for k in ["赤外線", "サーモ", "IR", "熱画像", "放射率", "反射率", "反射温度"])
+
+        # 材料・劣化のタグ（RAG強化用）
+        mats: Set[str] = set()
+        defs: Set[str] = set()
+        for mk, words in MATERIAL_KEYWORDS.items():
+            if any(w in txt for w in words):
+                mats.add(mk)
+        for dk, words in DEFECT_KEYWORDS.items():
+            if any(w in txt for w in words):
+                defs.add(dk)
+        d["_materials"] = mats
+        d["_defects"] = defs
+
     bm25 = BM25Index()
     if all_chunks:
         bm25.build(all_chunks)
     return {"index": bm25, "docs": all_chunks}
 
+def _extract_q_tags(query: str) -> Tuple[Set[str], Set[str], Dict[str, bool]]:
+    """
+    質問文から「材料」「劣化」「用途（基準／計画／IR）」を抽出。
+    """
+    mats: Set[str] = set()
+    defs: Set[str] = set()
+
+    for mk, words in MATERIAL_KEYWORDS.items():
+        if any(w in query for w in words):
+            mats.add(mk)
+    for dk, words in DEFECT_KEYWORDS.items():
+        if any(w in query for w in words):
+            defs.add(dk)
+
+    want_threshold = any(w in query for w in ["基準", "閾値", "幅", "mm", "％", "%", "℃", "温度", "判定"])
+    want_plan = any(w in query for w in ["長寿命", "更新優先", "優先度", "マネジメント", "総合管理計画", "LCC", "ライフサイクル"])
+    want_ir = any(w in query for w in ["赤外線", "IR", "サーモ", "熱画像", "サーモグラフィ"])
+
+    flags = {
+        "want_threshold": want_threshold,
+        "want_plan": want_plan,
+        "want_ir": want_ir,
+    }
+    return mats, defs, flags
+
 def rag_search(query: str, have_ir: bool, k: int = MAX_SNIPPETS) -> List[Dict[str, Any]]:
+    """
+    材料・劣化・用途に応じて BM25 をブーストした RAG 検索。
+    """
     data = build_rag()
     bm25: BM25Index = data["index"]
     docs = data["docs"]
     if not docs:
         return []
+
     q_tokens = query_expand_tokens(query)
-    want_threshold = any(w in query for w in ["基準", "閾値", "幅", "mm", "％", "%", "℃", "温度"])
+    q_mats, q_defs, flags = _extract_q_tags(query)
+    want_threshold = flags["want_threshold"]
+    want_plan = flags["want_plan"]
+    want_ir_q = flags["want_ir"]
+
+    # 自治体名によるブースト
     boost_muni = "港区" if "港区" in query else ("上島町" if ("上島町" in query or "上嶋町" in query) else None)
 
     scored: List[Tuple[float, int]] = []
     for doc_id, d in enumerate(docs):
         base = bm25.score_doc(q_tokens, doc_id)
+        if base <= 0:
+            continue
+
+        # (1) 数値基準を含むチャンクのブースト
         if want_threshold and d.get("_has_numbers"):
-            base *= 1.12
-        if have_ir and d.get("_has_ir"):
-            base *= 1.10
-        if boost_muni and boost_muni in d["doc"]:
             base *= 1.15
+
+        # (2) IR関連のチャンクを IR質問＆IR画像ありの場合にブースト
+        if (have_ir or want_ir_q) and d.get("_has_ir"):
+            base *= 1.12
+
+        # (3) doc_type（基準／計画）によるブースト
+        doc_type = d.get("doc_type", "その他")
+        if want_plan and doc_type == "計画":
+            base *= 1.18
+        if want_threshold and doc_type == "基準":
+            base *= 1.18
+
+        # (4) 材料×劣化のマッチング
+        mats: Set[str] = d.get("_materials", set())
+        defs: Set[str] = d.get("_defects", set())
+        mat_match = bool(q_mats & mats)
+        def_match = bool(q_defs & defs)
+
+        if mat_match:
+            base *= 1.15
+        if def_match:
+            base *= 1.15
+        if mat_match and def_match:
+            base *= 1.10  # 材料・劣化が両方揃うチャンクはさらに重視
+
+        # (5) 自治体名によるブースト
+        if boost_muni and boost_muni in d.get("doc", ""):
+            base *= 1.15
+
         if base > 0:
             scored.append((base, doc_id))
+
     scored.sort(key=lambda x: x[0], reverse=True)
-    top = [docs[i] for (_, i) in scored[:k]]
-    for t in top:
+    top_docs: List[Dict[str, Any]] = [docs[i] for (score, i) in scored[:k]]
+
+    # テキスト長のトリム
+    for t in top_docs:
         if len(t["text"]) > MAX_SNIPPET_CHARS:
             t["text"] = t["text"][:MAX_SNIPPET_CHARS] + "…"
-    return top
+    return top_docs
 
 # ---------------------- Web検索（任意・公的サイト優先） ----------------------
 @st.cache_data(ttl=600, show_spinner=False)
@@ -278,11 +390,12 @@ def _web_search_snippets_impl(query: str, max_items: int = 3) -> List[Dict[str, 
         trimmed: List[Dict[str, Any]] = []
         for r in results:
             trimmed.append({
-                "doc": f"WEB: {r['title']} ({r['url']})",
+                "doc": f"WEB: {r['title']}",
                 "path": r["url"],
                 "text": normalize_text(r["snippet"])[:MAX_SNIPPET_CHARS],
                 "page_start": None, "page_end": None,
-                "_web": True
+                "_web": True,
+                "doc_type": "Web",
             })
             if len(trimmed) >= max_items:
                 break
@@ -486,14 +599,67 @@ def call_gemini(
 def extract_text_from_gemini(result: Dict) -> str:
     """
     Gemini API のレスポンス JSON から本文テキストだけを取り出す。
-    フォーマットが想定と違ってもアプリが落ちないように安全側にする。
     """
     try:
         return result["candidates"][0]["content"]["parts"][0]["text"]
     except Exception:
         return ""
 
-# ---------------------- プロンプト（出典必須・強制） ----------------------
+# ---------------------- RAGプロンプト構築（グルーピング＋ID付与） ----------------------
+def _group_and_label_rag(
+    rag_snippets: List[Dict[str, Any]],
+    web_snippets: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    RAG抜粋を doc_type / Web ごとにグルーピングし、R1,R2,... のIDを振って
+    LLM に渡すためのテキストブロックを生成する。
+    返り値:
+      - rag_text: プロンプトに埋め込む文字列
+      - labeled_snips: _rag_id を付与したスニペットリスト
+    """
+    labeled: List[Dict[str, Any]] = []
+    counter = 1
+
+    def add_snips(snips: List[Dict[str, Any]], group_label: str):
+        nonlocal counter, labeled
+        lines: List[str] = []
+        for d in snips:
+            # スニペットにIDを付与
+            rid = f"R{counter}"
+            d = dict(d)  # コピーしてから追加
+            d["_rag_id"] = rid
+            labeled.append(d)
+
+            pg = f" p.{d['page_start']}" if d.get("page_start") else ""
+            src = d.get("doc", "")
+            txt = d.get("text", "")
+            lines.append(f"[{rid} {group_label} {src}{pg}] {txt}")
+            counter += 1
+        return "\n".join(lines)
+
+    # PDF側スニペット
+    pdf_snips = [d for d in (rag_snippets or []) if not d.get("_web")]
+    base_snips = [d for d in pdf_snips if d.get("doc_type") == "基準"]
+    plan_snips = [d for d in pdf_snips if d.get("doc_type") == "計画"]
+    other_snips = [d for d in pdf_snips if d.get("doc_type") not in ("基準", "計画")]
+
+    blocks: List[str] = []
+
+    if base_snips:
+        blocks.append("# RAG基準候補:\n" + add_snips(base_snips, "基準"))
+    if plan_snips:
+        blocks.append("# RAG計画・マネジメント:\n" + add_snips(plan_snips, "計画"))
+    if other_snips:
+        blocks.append("# RAGその他参考:\n" + add_snips(other_snips, "参考"))
+
+    # Webスニペット
+    web_snips = web_snippets or []
+    if web_snips:
+        blocks.append("# RAG Web情報:\n" + add_snips(web_snips, "Web"))
+
+    rag_text = "\n\n".join(blocks) if blocks else "（該当抜粋なし）"
+    return rag_text, labeled
+
 def build_master_prompt(user_q: str,
                         rag_snippets: List[Dict[str, Any]],
                         priors: str,
@@ -502,15 +668,15 @@ def build_master_prompt(user_q: str,
                         rule_grade: str,
                         rule_life: str,
                         ir_meta_note: str,
-                        web_snippets: Optional[List[Dict[str, Any]]] = None) -> str:
-    rag_lines = []
-    for d in rag_snippets:
-        pg = f" p.{d['page_start']}" if d.get("page_start") else ""
-        rag_lines.append(f"[{d['doc']}{pg}] {d['text']}")
-    if web_snippets:
-        for d in web_snippets:
-            rag_lines.append(f"[{d['doc']}] {d['text']}")
-    rag_text = "\n".join(rag_lines) if rag_lines else "（該当抜粋なし）"
+                        web_snippets: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    強化版プロンプト：
+      - RAGを用途別にグルーピング
+      - R1, R2,...IDで参照するよう指示
+    戻り値:
+      (prompt_text, labeled_rag_snippets)
+    """
+    rag_text, labeled_snips = _group_and_label_rag(rag_snippets, web_snippets)
 
     def pack_vis(v):
         m = v['metrics']
@@ -531,7 +697,7 @@ def build_master_prompt(user_q: str,
 - 作成日: {today}
 - ユーザー質問: {user_q}
 
-- RAG抜粋（出典ページ付き、これ以外は根拠にしない）:
+- RAG抜粋（ID付き。これ以外は根拠にしない。ただし「一般原則」は別途与える）:
 {rag_text}
 
 - ドメイン一般原則（閾値は含まない）:
@@ -549,12 +715,17 @@ def build_master_prompt(user_q: str,
   * 参考寿命: {rule_life}
 
 # 出力仕様（Markdown、“結果のみ”でセクション順序・見出しを厳守。Word貼付け前提で箇条書き多用）
-- 先頭に **総合評価（A/B/C/D、主因1–2行）** を明示
-- 「推定残存寿命」は**幅**で記載。RAG根拠が無ければ「参考（画像・一般原則ベース）」と注記
-- IRは相対指標であることを明示し、日射/雨直後など条件の留意点を記す
-- **重要：各主要所見（原因候補・基準適合・推奨対策）には、可能な限り行末に必ず `［出典: 文書名/ページ or URL］` を最低1件併記すること。根拠がRAGに無い場合は「未掲載」と明記する。**
+1. 先頭に **総合評価（A/B/C/D、主因1–2行）** を明示すること。
+2. 「推定残存寿命」は**幅（例：5〜10年）**で記載すること。RAG根拠が無ければ「参考（画像・一般原則ベース）」と注記する。
+3. IRは相対指標であることを明示し、日射/雨直後など条件の留意点を記すこと。
+4. 重要：各主要所見（原因候補・基準適合・推奨対策）には、可能な限り行末に必ず `［根拠: R1,R3］` のようにRAG IDを最低1件併記すること。
+   - RAGに根拠が無い場合は `［根拠: 未掲載（一般原則ベース）］` と明記すること。
+5. 書き方:
+   - 「総合評価」「診断の根拠」「推奨対策」「追加調査の提案」のようにセクションを分ける。
+   - 数値を扱う場合は、RAG内の記述に基づく場合のみとし、RAG IDを明示する。
 """.strip()
-    return normalize_text(prompt)
+
+    return normalize_text(prompt), labeled_snips
 
 # ---------------------- CSS（非表示注入） ----------------------
 def inject_material_css():
@@ -661,7 +832,7 @@ def main():
     # ===================== サイドバー：モード・サマリ =====================
     with st.sidebar:
         st.markdown("### 🏗️ 建物診断くん")
-        st.caption("スマホ対応 / 複数画像 × RAG × Gemini 2.5 Flash")
+        st.caption("スマホ対応 / 複数画像 × RAG強化 × Gemini 2.5 Flash")
 
         # グローバル設定
         fast_mode = st.toggle(
@@ -707,7 +878,7 @@ def main():
 <div class="app-hero jp-sans">
   <div class="app-hero-title">🏗️ {APP_TITLE}</div>
   <div class="app-hero-sub">
-    スマホ最適 / 複数画像（可視・赤外）× RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash
+    スマホ最適 / 複数画像（可視・赤外）× RAG（基準/計画/材料/劣化で強化）× Web併用（任意）× Gemini 2.5 Flash
   </div>
 </div>
         """,
@@ -728,7 +899,7 @@ def main():
             "",
             placeholder="分析したいテーマ・質問を入力してください"
         )
-        st.caption("※ 具体的な部位・材料・症状（例：タイル浮き、ALC版の含水、屋上防水のふくれ）を書くほど精度が上がります。")
+        st.caption("※ 具体的な部位・材料・症状（例：タイル浮き、ALC版の含水、屋上防水のふくれ）を書くほどRAGが効きます。")
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ---------- ② 画像入力 ----------
@@ -1024,7 +1195,7 @@ def main():
             )
 
             priors = domain_priors_text()
-            prompt = build_master_prompt(
+            prompt, labeled_rag = build_master_prompt(
                 user_q=user_q,
                 rag_snippets=snippets,
                 priors=priors,
@@ -1120,7 +1291,23 @@ def main():
                 st.markdown("###### 📋 Word貼付け用テキスト（全選択→コピー）")
                 st.text_area("", value=report_md, height=260, label_visibility="collapsed")
 
-            # 11) ダウンロード（MD / TXT）
+            # 11) 今回参照したRAG抜粋一覧
+            with st.expander("今回参照したRAG抜粋（PDF / Web）", expanded=False):
+                if not labeled_rag:
+                    st.write("RAG抜粋はありませんでした。")
+                else:
+                    for d in labeled_rag:
+                        rid = d.get("_rag_id", "R?")
+                        doc = d.get("doc", "")
+                        doc_type = d.get("doc_type", "")
+                        path = d.get("path", "")
+                        pg = f"p.{d['page_start']}" if d.get("page_start") else ""
+                        st.markdown(f"**{rid} | {doc_type} | {doc} {pg}**")
+                        st.caption(path)
+                        st.write(d.get("text", ""))
+                        st.markdown("---")
+
+            # 12) ダウンロード（MD / TXT）
             md_bytes = report_md.encode("utf-8")
             txt_bytes = report_md.encode("utf-8-sig")
             col_dl1, col_dl2 = st.columns(2)
@@ -1144,7 +1331,7 @@ def main():
             progress.progress(100, text="完了")
             progress.empty()
 
-    st.caption("© 建物診断くん — 複数画像 × RAG × Web併用（任意）× ドメイン知識 × Gemini 2.5 Flash。")
+    st.caption("© 建物診断くん — RAG強化版（基準 / 計画 / 材料 / 劣化タグ）× 複数画像 × Web併用（任意）× Gemini 2.5 Flash。")
 
 
 if __name__ == "__main__":
