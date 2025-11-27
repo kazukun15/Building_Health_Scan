@@ -431,22 +431,66 @@ def image_to_inline_part(image: Image.Image, max_width: int = 1400) -> Dict:
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
     return {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
 
-def call_gemini(api_key: str, prompt_text: str, image_parts: List[Dict]) -> Dict:
-    # モデル：Gemini 2.5 Flash
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+def call_gemini(
+    api_key: str,
+    prompt_text: str,
+    image_parts: List[Dict],
+    max_retries: int = 3,
+    timeout: int = 120,
+) -> Dict:
+    """
+    Gemini 2.5 Flash を呼び出す。
+    503（overloaded）の場合は最大 max_retries 回まで自動再試行する。
+    """
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        "models/gemini-2.5-flash:generateContent"
+        f"?key={api_key}"
+    )
     headers = {"Content-Type": "application/json"}
     parts = [{"text": prompt_text}]
     parts.extend(image_parts)
     payload = {"contents": [{"parts": parts}]}
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    resp.raise_for_status()
-    return resp.json()
 
-def extract_text_from_gemini(result: Dict) -> str:
-    try:
-        return result["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return ""
+    last_err: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+
+            # 503（過負荷）のときだけリトライ
+            if status == 503 and attempt < max_retries:
+                wait_sec = 3 * attempt  # 3秒, 6秒, 9秒... のように少しずつ延ばす
+                try:
+                    st.toast(
+                        f"Gemini が一時的に過負荷のため再試行します "
+                        f"({attempt}/{max_retries - 1})",
+                        icon="⚠️",
+                    )
+                except Exception:
+                    # toast が使えない環境でもアプリが止まらないように握りつぶす
+                    pass
+                time.sleep(wait_sec)
+                last_err = e
+                continue
+
+            # それ以外の HTTP エラー、またはリトライ尽きたらそのまま投げる
+            last_err = e
+            break
+        except Exception as e:
+            # 通信系などの別の例外もそのまま外側で処理
+            last_err = e
+            break
+
+    # ここまで来たらすべて失敗
+    if isinstance(last_err, Exception):
+        raise last_err
+    raise RuntimeError("Gemini 呼び出しに失敗しました（未知のエラー）。")
+
 
 # ---------------------- プロンプト（出典必須・強制） ----------------------
 def build_master_prompt(user_q: str,
@@ -1096,4 +1140,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
