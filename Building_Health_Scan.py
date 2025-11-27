@@ -23,6 +23,7 @@ import math
 import base64
 import statistics
 import unicodedata
+import time  # ★ 追加
 from datetime import date
 from typing import List, Tuple, Dict, Optional, Any
 
@@ -1095,3 +1096,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
